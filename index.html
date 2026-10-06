@@ -1,0 +1,321 @@
+<!doctype html>
+<html lang="ro">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>Ghicește Piesa</title>
+<meta property="og:title" content="Ghicește Piesa">
+<meta property="og:description" content="Joc privat cu prietenii: fiecare pune 5 piese, ceilalți le ghicesc pornind de la 0.1 secunde.">
+<meta name="theme-color" content="#0a0e0c">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Ccircle cx='32' cy='32' r='30' fill='%231fdf6f'/%3E%3Cpath d='M25 19l22 13-22 13z' fill='%230a0e0c'/%3E%3C/svg%3E">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@500;600&family=Poppins:ital,wght@0,400;0,500;0,600;0,700;1,800;1,900&display=swap" rel="stylesheet">
+<style>
+  /* Layout: o singură coloană îngustă, centrată, ca un player; eroul e butonul verde de play. */
+  :root{
+    --bg:#0a0e0c; --s1:#111714; --s2:#161d19; --s3:#1d2621; --line:#25302a;
+    --tx:#e8eee9; --mut:#7f8d85; --dim:#48534d; --logo:#1d2622;
+    --g:#1fdf6f; --gbg:#11351f; --gdim:#1a3b28;
+    --y:#f2c94c; --o:#ff8a3d; --obg:#2d1c11; --r:#ff5d5d; --rbg:#2d1415; --p:#b26bff;
+    --f:"Poppins",system-ui,-apple-system,"Segoe UI",sans-serif;
+    --m:"IBM Plex Mono",ui-monospace,Menlo,monospace;
+    color-scheme:dark;
+  }
+  *{box-sizing:border-box}
+  html,body{margin:0}
+  body{background:radial-gradient(120% 55% at 50% -12%,#14211a 0%,var(--bg) 62%) var(--bg);color:var(--tx);font:15px/1.5 var(--f);min-height:100dvh;-webkit-font-smoothing:antialiased}
+  [hidden]{display:none!important}
+  .app{max-width:440px;margin:0 auto;padding:max(26px,env(safe-area-inset-top)) 16px 64px}
+  .logo{font:italic 900 clamp(44px,13vw,58px)/1 var(--f);letter-spacing:-2px;color:var(--logo);text-align:center;margin:6px 0 26px;user-select:none;text-shadow:0 1px 0 #26302b}
+  h2{font-size:20px;font-weight:700;margin:0 0 4px;letter-spacing:-.3px}
+  .hint{color:var(--mut);font-size:13px;margin:0}
+  .label{font-size:12px;font-weight:600;color:var(--mut);text-transform:uppercase;letter-spacing:.08em;margin:22px 0 10px;display:flex;justify-content:space-between}
+  .stack{display:flex;flex-direction:column;gap:12px}
+  .row{display:flex;gap:8px;align-items:center}
+  .row>*{min-width:0}
+  input[type=text],input[type=password]{width:100%;height:50px;padding:0 16px;border-radius:12px;border:1px solid var(--line);background:var(--s1);color:var(--tx);font:500 15px var(--f);outline:none;transition:border-color .15s}
+  input:focus{border-color:#3b8f5f}
+  input::placeholder{color:var(--dim)}
+  input:disabled{opacity:.55}
+  button{font-family:var(--f);cursor:pointer}
+  button:disabled{cursor:not-allowed;opacity:.4}
+  button:focus-visible,input:focus-visible{outline:2px solid var(--g);outline-offset:2px}
+  .btn{height:50px;padding:0 20px;border-radius:12px;border:1px solid var(--line);background:var(--s2);color:var(--tx);font-weight:600;font-size:15px;display:inline-flex;align-items:center;justify-content:center;gap:8px;transition:transform .08s,background .15s}
+  .btn:active:not(:disabled){transform:scale(.98)}
+  .btn:hover:not(:disabled){background:var(--s3)}
+  .btn.primary{background:var(--g);border-color:var(--g);color:#04140a;box-shadow:0 0 28px rgba(31,223,111,.28)}
+  .btn.primary:hover:not(:disabled){background:#35e77f}
+  .btn.wide{width:100%}
+  .btn.small{height:38px;padding:0 14px;font-size:13px;border-radius:10px}
+  .link{background:none;border:none;color:var(--mut);font-size:13px;font-weight:500;padding:6px;text-decoration:underline;text-underline-offset:3px}
+  .link:hover{color:var(--tx)}
+  .or{display:flex;align-items:center;gap:12px;color:var(--dim);font-size:12px;margin:8px 0}
+  .or::before,.or::after{content:"";flex:1;height:1px;background:var(--line)}
+  .err{color:var(--r);font-size:13px;min-height:1.2em;margin:0}
+
+  /* pastile dificultate, ca în referință */
+  .pills{display:flex;gap:8px;flex-wrap:wrap;justify-content:center}
+  .pill{border:none;border-radius:999px;padding:8px 20px;font:600 13px var(--f)}
+  .pill.easy{color:var(--g);background:var(--gbg)}
+  .pill.hard{color:var(--o);background:var(--obg)}
+  .pill.easy.on{background:var(--g);color:#04140a;box-shadow:0 0 18px rgba(31,223,111,.35)}
+  .pill.hard.on{background:var(--o);color:#1f0d02;box-shadow:0 0 18px rgba(255,138,61,.3)}
+  .pills.static .pill:not(.on){opacity:.45}
+  .tabs{display:flex;justify-content:center;gap:22px;font-size:12px;color:var(--dim);font-weight:500;margin-bottom:16px;flex-wrap:wrap}
+  .tabs .on{color:#c9d2cc;font-weight:600}
+
+  /* lobby */
+  .codebox{background:var(--s1);border:1px solid var(--line);border-radius:16px;padding:18px;text-align:center}
+  .code{font:600 40px/1.1 var(--m);letter-spacing:8px;color:var(--g);margin:4px 0 14px;padding-left:8px}
+  .plist{list-style:none;margin:0;padding:0;display:flex;flex-direction:column;gap:8px}
+  .plist li{display:flex;align-items:center;gap:12px;background:var(--s1);border:1px solid var(--line);border-radius:12px;padding:10px 12px;font-weight:500}
+  .plist li.empty{border-style:dashed;color:var(--dim);background:transparent}
+  .av{width:32px;height:32px;border-radius:50%;display:grid;place-items:center;font-weight:700;font-size:14px;color:#07110b;flex:none}
+  .plist .tag{margin-left:auto;font-size:12px;color:var(--mut)}
+  .nums{display:grid;grid-template-columns:repeat(9,1fr);gap:6px}
+  .nums button{height:40px;border-radius:10px;border:1px solid var(--line);background:var(--s1);color:var(--tx);font:600 14px var(--m)}
+  .nums button.on{background:var(--g);border-color:var(--g);color:#04140a}
+
+  /* piese */
+  .srow{display:grid;grid-template-columns:22px 1fr;gap:10px;background:var(--s1);border:1px solid var(--line);border-radius:14px;padding:12px}
+  .srow .n{font:600 14px var(--m);color:var(--dim);padding-top:13px;text-align:center}
+  .srow .f{display:flex;flex-direction:column;gap:8px;min-width:0}
+  .srow input{height:44px;background:var(--s2)}
+  .sstat{font-size:12px;color:var(--mut);min-height:1em}
+  .sstat.ok{color:var(--g)} .sstat.bad{color:var(--r)} .sstat.load{color:var(--y)}
+  .chips{display:flex;flex-wrap:wrap;gap:6px}
+  .chip{display:inline-flex;align-items:center;gap:6px;font-size:12px;font-weight:500;padding:5px 10px;border-radius:999px;background:var(--s2);border:1px solid var(--line);color:var(--mut)}
+  .chip.ok{color:var(--g);border-color:#1f4a31}
+  .chip.bad{color:var(--r);border-color:#4a2224}
+  .chip.me{color:var(--tx)}
+
+  /* bara de timp */
+  .bar{position:relative;height:26px;background:var(--s3);border-radius:999px;overflow:hidden}
+  .bar .unl{position:absolute;inset:0 auto 0 0;background:var(--gdim);width:0;transition:width .35s ease}
+  .bar .prog{position:absolute;inset:0 auto 0 0;background:var(--g);width:0}
+  .bar .tk{position:absolute;top:0;bottom:0;width:1px;background:#0b100d}
+  .mk{position:relative;height:30px;margin-top:4px}
+  .mk div{position:absolute;transform:translateX(-50%);text-align:center;font:600 11px var(--m);color:var(--g);transition:left .35s ease}
+  .mk div::before{content:"";display:block;margin:0 auto 2px;width:0;height:0;border-left:5px solid transparent;border-right:5px solid transparent;border-bottom:6px solid var(--g)}
+  .playrow{position:relative;display:flex;justify-content:center;margin:26px 0 30px}
+  .play{width:124px;height:124px;border-radius:50%;border:none;background:var(--g);display:grid;place-items:center;box-shadow:0 0 0 10px rgba(31,223,111,.07),0 0 60px rgba(31,223,111,.42);transition:transform .1s}
+  .play:active:not(:disabled){transform:scale(.96)}
+  .play svg{width:44px;height:44px;fill:#07130c;margin-left:6px}
+  .play.on svg{margin-left:0}
+  .play.on{animation:pulse 1.2s ease-in-out infinite}
+  @keyframes pulse{50%{box-shadow:0 0 0 16px rgba(31,223,111,.05),0 0 80px rgba(31,223,111,.55)}}
+  .time{position:absolute;left:calc(50% + 78px);top:50%;transform:translateY(-50%);font:600 20px var(--m);color:var(--g)}
+  .search{flex:1;display:flex;align-items:center;gap:10px;height:50px;background:var(--s1);border:1px solid var(--line);border-radius:12px;padding:0 6px 0 14px}
+  .search:focus-within{border-color:#3b8f5f}
+  .search svg{width:17px;height:17px;flex:none;stroke:var(--mut);fill:none;stroke-width:2}
+  .search input{border:none;background:transparent;height:46px;padding:0;flex:1}
+  .send{width:36px;height:36px;border-radius:9px;border:none;background:var(--s3);color:var(--tx);font-size:18px;flex:none}
+  .skip{height:50px;padding:0 18px;border-radius:12px;border:1px solid var(--line);background:var(--s1);color:var(--tx);font-weight:600;display:inline-flex;align-items:center;gap:8px;flex:none}
+  .skip svg{width:14px;height:14px;fill:var(--tx)}
+  .opts{display:flex;flex-direction:column;gap:8px}
+  .opt{min-height:50px;text-align:left;padding:10px 16px;border-radius:12px;border:1px solid var(--line);background:var(--s1);color:var(--tx);font:500 14px/1.35 var(--f)}
+  .opt:hover:not(:disabled){border-color:#3b8f5f;background:var(--s2)}
+  .opt.wrong{text-decoration:line-through;color:var(--r);opacity:.6}
+  .gl{display:flex;flex-direction:column;gap:6px;margin-top:10px}
+  .gl div{display:flex;justify-content:space-between;gap:10px;font-size:13px;color:var(--mut)}
+  .gl .x{color:var(--r)} .gl .v{color:var(--g)}
+  .gl span:last-child{font-family:var(--m);font-size:12px;white-space:nowrap}
+  .note{background:var(--s1);border:1px solid var(--line);border-radius:14px;padding:16px;text-align:center}
+  .note b{display:block;font-size:18px}
+  .note.win b{color:var(--g)}
+
+  /* player media */
+  .media{position:relative;margin-top:20px;border-radius:14px;overflow:hidden;background:#000;height:64px;transition:height .3s ease}
+  .media.open.yt{height:auto;aspect-ratio:16/9;max-width:100%}
+  .media.open.sp{height:152px}
+  .media .w{position:absolute;inset:0}
+  .media .w iframe{width:100%;height:100%;border:0;display:block}
+  .media.sp .w iframe{height:152px}
+  .cover{position:absolute;inset:0;z-index:2;background:var(--s1);border:1px solid var(--line);border-radius:14px;display:flex;align-items:center;justify-content:center;gap:12px;color:var(--mut);font-size:13px}
+  .eq{display:flex;gap:3px;align-items:flex-end;height:22px}
+  .eq i{width:4px;height:6px;background:var(--dim);border-radius:2px}
+  .cover.on .eq i{background:var(--g);animation:eq .7s ease-in-out infinite alternate}
+  .cover.on .eq i:nth-child(2){animation-delay:.15s}.cover.on .eq i:nth-child(3){animation-delay:.3s}.cover.on .eq i:nth-child(4){animation-delay:.1s}.cover.on .eq i:nth-child(5){animation-delay:.25s}
+  @keyframes eq{to{height:22px}}
+  .vol{display:flex;align-items:center;gap:10px;margin-top:14px;color:var(--mut);font-size:12px}
+  .vol input{flex:1;accent-color:var(--g)}
+
+  /* reveal + final */
+  .reveal{text-align:center;margin:4px 0 6px}
+  .reveal .t{font-size:22px;font-weight:700;letter-spacing:-.3px;line-height:1.25;text-wrap:balance}
+  .reveal .o{color:var(--mut);font-size:13px;margin-top:4px}
+  .res{display:flex;flex-direction:column;gap:8px;margin-top:16px}
+  .res .r{display:flex;align-items:center;gap:10px;background:var(--s1);border:1px solid var(--line);border-radius:12px;padding:10px 12px;font-size:14px}
+  .res .r .s{margin-left:auto;font:600 13px var(--m);white-space:nowrap}
+  .res .r .s.v{color:var(--g)} .res .r .s.x{color:var(--r)}
+  .res .gq{font-size:12px;color:var(--mut);display:flex;gap:8px;align-items:center;flex-wrap:wrap;padding:0 12px 4px 54px;margin-top:-4px}
+  .acc{border:1px solid #1f4a31;background:var(--gbg);color:var(--g);border-radius:8px;font:600 11px var(--f);padding:3px 8px}
+  .owner{background:var(--s1);border:1px solid var(--line);border-radius:14px;padding:14px 16px}
+  .owner .t{font-weight:700}
+  .board{display:flex;flex-direction:column;gap:8px}
+  .board .r{display:flex;align-items:center;gap:12px;background:var(--s1);border:1px solid var(--line);border-radius:12px;padding:12px 14px}
+  .board .r.first{border-color:#2b6b45;background:#0f1d15}
+  .board .pl{font:600 14px var(--m);color:var(--dim);width:20px}
+  .board .first .pl{color:var(--g)}
+  .board .sc{margin-left:auto;font:600 16px var(--m)}
+  .win-t{text-align:center;font-size:26px;font-weight:800;letter-spacing:-.5px;margin:0 0 4px;text-wrap:balance}
+  .win-t span{color:var(--g)}
+  .recap{display:flex;flex-direction:column;gap:6px}
+  .recap div{font-size:13px;display:flex;justify-content:space-between;gap:12px;border-bottom:1px solid var(--line);padding:8px 0}
+  .recap div span:first-child{min-width:0}
+  .recap small{display:block;color:var(--mut)}
+  .recap .g{color:var(--g);white-space:nowrap;font-size:12px}
+  #toast{position:fixed;left:50%;bottom:max(24px,env(safe-area-inset-bottom));transform:translateX(-50%) translateY(20px);background:#202a24;border:1px solid var(--line);color:var(--tx);padding:10px 16px;border-radius:12px;font-size:14px;opacity:0;pointer-events:none;transition:all .2s;z-index:9;max-width:calc(100% - 32px)}
+  #toast.on{opacity:1;transform:translateX(-50%)}
+  #checker{position:fixed;left:-10000px;top:0;width:240px;height:160px;overflow:hidden}
+  .plist .off{opacity:.45}
+  .chip.off{opacity:.45}
+  .conn{position:fixed;top:10px;right:12px;max-width:calc(100% - 24px);font-size:11px;color:var(--r);background:var(--rbg);padding:4px 10px;border-radius:999px}
+  @media (prefers-reduced-motion:reduce){*{animation:none!important;transition:none!important}}
+  @media (max-width:400px){.time{left:calc(50% + 70px);font-size:17px}.play{width:110px;height:110px}.nums{grid-template-columns:repeat(5,1fr)}}
+</style>
+</head>
+<body>
+<div class="app">
+  <div class="logo" aria-hidden="true">ghicește</div>
+  <div class="conn" id="conn" hidden>reconectare…</div>
+
+  <!-- PAROLĂ -->
+  <section id="s-gate" hidden>
+    <form class="stack" id="gateForm" autocomplete="off">
+      <div><h2>Joc privat</h2><p class="hint">Scrie parola ca să intri.</p></div>
+      <input type="password" id="gatePw" placeholder="Parola" autocomplete="current-password">
+      <p class="err" id="gateErr"></p>
+      <button class="btn primary wide" type="submit">Intră</button>
+    </form>
+  </section>
+
+  <!-- ACASĂ -->
+  <section id="s-home" hidden>
+    <div class="stack">
+      <div><label class="label" for="homeName" style="margin-top:0">Numele tău</label>
+      <input type="text" id="homeName" placeholder="ex: David" maxlength="18" autocomplete="nickname"></div>
+      <div id="homeLinkJoin" hidden class="stack">
+        <button class="btn primary wide" id="joinLinkBtn">Intră în camera <span id="homeLinkCode"></span></button>
+        <button class="link" id="homeOther">Creează alt joc</button>
+      </div>
+      <div id="homeChoices" class="stack">
+        <button class="btn primary wide" id="createBtn">Creează joc</button>
+        <div class="or">sau intră cu un cod</div>
+        <div class="row"><input type="text" id="homeCode" placeholder="Cod (ex: KQZTM)" maxlength="8" style="text-transform:uppercase;font-family:var(--m);letter-spacing:2px"><button class="btn" id="joinBtn">Join</button></div>
+      </div>
+      <p class="err" id="homeErr"></p>
+    </div>
+  </section>
+
+  <!-- LOBBY -->
+  <section id="s-lobby" hidden>
+    <div class="codebox">
+      <div class="hint">Codul camerei</div>
+      <div class="code" id="lCode">-----</div>
+      <div class="row"><input type="text" id="lLink" readonly aria-label="Link de invitație"><button class="btn primary" id="lCopy" style="flex:none">Copiază</button></div>
+      <p class="hint" style="margin-top:10px">Trimite linkul sau codul fiecărui prieten. Au nevoie și de parolă.</p>
+    </div>
+    <div class="label"><span>Jucători</span><span id="lCount"></span></div>
+    <ul class="plist" id="lPlayers"></ul>
+    <div id="lHost">
+      <div class="label"><span>Câți jucători</span></div>
+      <div class="nums" id="lNums"></div>
+      <div class="label"><span>Dificultate</span></div>
+      <div class="pills" id="lModes"><button class="pill easy" data-mode="easy">Easy</button><button class="pill hard" data-mode="hard">Hard</button></div>
+      <p class="hint" id="lModeHint" style="text-align:center;margin-top:10px"></p>
+      <button class="btn primary wide" id="lStart" style="margin-top:20px">Începe jocul</button>
+    </div>
+    <div id="lGuest" class="note" style="margin-top:20px"></div>
+    <div style="text-align:center;margin-top:14px"><button class="link" id="lLeave">Ieși din cameră</button></div>
+  </section>
+
+  <!-- PIESE -->
+  <section id="s-setup" hidden>
+    <h2>Piesele tale</h2>
+    <p class="hint">Pune 5 linkuri de pe YouTube sau Spotify. Ceilalți nu le văd. Verifică titlul: după el se ghicește (Artist – Titlu).</p>
+    <div class="stack" id="songRows" style="margin-top:16px"></div>
+    <p class="err" id="setupErr" style="margin-top:10px"></p>
+    <button class="btn primary wide" id="readyBtn">Gata</button>
+    <button class="btn wide" id="editBtn" hidden>Modific piesele</button>
+    <div class="label"><span>Cine e gata</span></div>
+    <div class="chips" id="readyChips"></div>
+  </section>
+
+  <!-- RUNDĂ -->
+  <section id="s-round" hidden>
+    <div class="tabs"><span id="rRoom"></span><span class="on" id="rOwner"></span><span id="rCount"></span></div>
+    <div class="pills static" id="rModes" style="margin-bottom:22px"><span class="pill easy">Easy</span><span class="pill hard">Hard</span></div>
+    <div class="bar" id="bar"><div class="unl" id="barUnl"></div><div class="prog" id="barProg"></div></div>
+    <div class="mk"><div id="barMk">0.1s</div></div>
+    <div class="playrow">
+      <button class="play" id="playBtn" aria-label="Ascultă"><svg viewBox="0 0 24 24" id="playIco"><path d="M6 3.5v17a1 1 0 0 0 1.5.86l14-8.5a1 1 0 0 0 0-1.72l-14-8.5A1 1 0 0 0 6 3.5z"/></svg></button>
+      <span class="time" id="timeLbl">0.1s</span>
+    </div>
+
+    <div id="gHard" class="row" hidden>
+      <form class="search" id="guessForm" autocomplete="off">
+        <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="7"/><path d="M20 20l-4-4"/></svg>
+        <input type="text" id="guessInput" placeholder="Scrie numele piesei" maxlength="80" enterkeyhint="send">
+        <button class="send" type="submit" aria-label="Trimite">→</button>
+      </form>
+      <button class="skip" id="skipBtn"><svg viewBox="0 0 24 24"><path d="M5 4l10 8-10 8zM17 4h3v16h-3z"/></svg>Skip</button>
+    </div>
+    <div id="gEasy" hidden>
+      <div class="opts" id="opts"></div>
+      <div class="row" style="margin-top:8px;justify-content:flex-end"><button class="skip" id="skipBtn2"><svg viewBox="0 0 24 24"><path d="M5 4l10 8-10 8zM17 4h3v16h-3z"/></svg>Skip</button></div>
+    </div>
+    <div id="gGive" style="text-align:center;margin-top:6px" hidden><button class="link" id="giveBtn">Renunț (give up)</button></div>
+    <div class="gl" id="myGuesses"></div>
+    <div class="note" id="doneBox" hidden></div>
+    <div class="owner" id="ownerBox" hidden></div>
+
+    <div class="reveal" id="revealHead" hidden><div class="t" id="rvTitle"></div><div class="o" id="rvOwner"></div></div>
+
+    <div class="media" id="media">
+      <div class="w" id="ytWrap"><div id="ytPlayer"></div></div>
+      <div class="w" id="spWrap" hidden><div id="spPlayer"></div></div>
+      <div class="cover" id="cover"><div class="eq"><i></i><i></i><i></i><i></i><i></i></div><span id="coverTxt">Piesa e ascunsă</span></div>
+    </div>
+
+    <div id="revealBox" hidden>
+      <div class="res" id="rvRes"></div>
+      <button class="btn primary wide" id="nextBtn" style="margin-top:18px">Următoarea</button>
+    </div>
+    <div class="label" id="whoLbl"><span>Jucători</span><span id="rScoreHint"></span></div>
+    <div class="chips" id="who"></div>
+    <div class="vol"><span>Volum</span><input type="range" id="vol" min="0" max="100" value="85" aria-label="Volum"></div>
+    <div style="text-align:center;margin-top:12px"><button class="link" id="forceBtn" hidden></button></div>
+  </section>
+
+  <!-- FINAL -->
+  <section id="s-end" hidden>
+    <p class="win-t" id="winT"></p>
+    <p class="hint" style="text-align:center" id="winSub"></p>
+    <div class="label"><span>Clasament</span></div>
+    <div class="board" id="board"></div>
+    <div id="endHost" class="stack" style="margin-top:20px">
+      <button class="btn primary wide" id="rematchBtn">Revanșă cu aceleași piese</button>
+      <button class="btn wide" id="newSongsBtn">Piese noi</button>
+    </div>
+    <p class="hint" id="endGuest" style="text-align:center;margin-top:16px"></p>
+    <div class="label"><span>Piesele jocului</span></div>
+    <div class="recap" id="recap"></div>
+    <div style="text-align:center;margin-top:16px"><button class="link" id="endLeave">Ieși din cameră</button></div>
+  </section>
+</div>
+
+<div id="checker"><div id="checkerPlayer"></div></div>
+<div id="toast" role="status"></div>
+
+<script>
+  window.onYouTubeIframeAPIReady = function () { window.__yt = true; window.dispatchEvent(new Event("yt-ready")); };
+  window.onSpotifyIframeApiReady = function (api) { window.__sp = api; window.dispatchEvent(new Event("sp-ready")); };
+</script>
+<script src="https://cdn.jsdelivr.net/npm/peerjs@1.5.4/dist/peerjs.min.js"></script>
+<script src="https://www.youtube.com/iframe_api" async></script>
+<script src="https://open.spotify.com/embed/iframe-api/v1" async></script>
+<script type="module" src="client.js"></script>
+</body>
+</html>
