@@ -249,6 +249,117 @@ function joinRoom() {
 }
 $("#homeOther").onclick = () => { room = ""; history.replaceState(null, "", location.pathname); goHome(); };
 
+// ── Spotify (doar gazda, ca să citească playlistul) ───────────────────────────
+const SPOTIFY_CLIENT_ID = "__SPOTIFY_CLIENT_ID__";
+const SP_REDIRECT = "https://davidroszel13.github.io/ghiceste-piesa/";
+const b64url = (buf) => btoa(String.fromCharCode(...new Uint8Array(buf))).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+let spPrep = null;
+function spToken() { try { return JSON.parse(store.get("gp:spt") || "null"); } catch { return null; } }
+function spSaveTok(j, oldRt) { store.set("gp:spt", JSON.stringify({ at: j.access_token, exp: Date.now() + (j.expires_in || 3600) * 1000, rt: j.refresh_token || oldRt || "" })); }
+async function spAccess() {
+  const t = spToken(); if (!t) return null;
+  if (Date.now() < t.exp - 60000) return t.at;
+  if (!t.rt) { store.del("gp:spt"); return null; }
+  try {
+    const r = await fetch("https://accounts.spotify.com/api/token", { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ grant_type: "refresh_token", refresh_token: t.rt, client_id: SPOTIFY_CLIENT_ID }) });
+    if (!r.ok) throw 0;
+    const j = await r.json(); spSaveTok(j, t.rt); return j.access_token;
+  } catch { store.del("gp:spt"); return null; }
+}
+async function spPrepare() {
+  if (spPrep) return;
+  const v = b64url(crypto.getRandomValues(new Uint8Array(48)));
+  const ch = b64url(await crypto.subtle.digest("SHA-256", new TextEncoder().encode(v)));
+  spPrep = { v, ch, st: b64url(crypto.getRandomValues(new Uint8Array(12))) };
+}
+function spLogin() {
+  if (!SPOTIFY_CLIENT_ID || SPOTIFY_CLIENT_ID.startsWith("__")) { toast("Conectarea la Spotify nu e configurată încă."); return; }
+  if (!spPrep) { spPrepare(); toast("Mai apasă o dată."); return; }
+  store.set("gp:spv", spPrep.v); store.set("gp:sps", spPrep.st); store.set("gp:spReturn", room);
+  const u = "https://accounts.spotify.com/authorize?" + new URLSearchParams({ client_id: SPOTIFY_CLIENT_ID, response_type: "code", redirect_uri: SP_REDIRECT, code_challenge_method: "S256", code_challenge: spPrep.ch, state: spPrep.st, scope: "playlist-read-private playlist-read-collaborative" });
+  spPrep = null;
+  const w = window.open(u, "gp_spotify", "width=480,height=760");
+  if (!w) location.href = u; // fereastra a fost blocată: mergem în aceeași pagină
+}
+// întoarcerea de la Spotify (în fereastra mică sau în aceeași pagină)
+async function spCallback() {
+  const q = new URLSearchParams(location.search);
+  const code = q.get("code"), st = q.get("state"), err = q.get("error");
+  if (!code && !err) return false;
+  if (code && st && st === store.get("gp:sps")) {
+    try {
+      const r = await fetch("https://accounts.spotify.com/api/token", { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ grant_type: "authorization_code", code, redirect_uri: SP_REDIRECT, client_id: SPOTIFY_CLIENT_ID, code_verifier: store.get("gp:spv") }) });
+      if (r.ok) spSaveTok(await r.json());
+    } catch {}
+  }
+  store.del("gp:sps"); store.del("gp:spv");
+  if (window.opener && window.name === "gp_spotify") {
+    try { window.opener.postMessage({ gpSpotify: 1 }, location.origin); } catch {}
+    document.body.innerHTML = '<p style="font:16px system-ui;color:#e8eee9;text-align:center;margin-top:40vh">Gata, te poți întoarce la joc.</p>';
+    setTimeout(() => window.close(), 300);
+    return true;
+  }
+  const back = store.get("gp:spReturn"); store.del("gp:spReturn");
+  if (back) room = back;
+  history.replaceState(null, "", location.pathname + (back ? "?room=" + back : ""));
+  return false;
+}
+window.addEventListener("message", (e) => { if (e.origin === location.origin && e.data && e.data.gpSpotify) { toast(spToken() ? "Conectat la Spotify ✓" : "Conectarea la Spotify nu a mers."); if (V?.phase === "lobby") renderLobby(); } });
+window.addEventListener("storage", (e) => { if (e.key === "gp:spt" && V?.phase === "lobby") renderLobby(); });
+function parsePlaylist(u) { const m = String(u).match(/playlist[/:]([A-Za-z0-9]{22})/); return m ? m[1] : null; }
+async function spGet(url) {
+  const at = await spAccess(); if (!at) throw new Error("login");
+  const r = await fetch(url, { headers: { Authorization: "Bearer " + at } });
+  if (r.status === 401) { store.del("gp:spt"); throw new Error("login"); }
+  if (!r.ok) throw new Error("http" + r.status);
+  return r.json();
+}
+// Citim playlistul doar din link, fără cont: pagina publică „embed” a Spotify (prin r.jina.ai,
+// care o descarcă pentru noi) are lista pieselor și o previzualizare mp3 de 30 s pentru fiecare.
+async function fetchEmbed(id) {
+  const T = "https://open.spotify.com/embed/playlist/" + id;
+  let last = "net";
+  for (let k = 0; k < 2; k++) {
+    try {
+      const ac = new AbortController(); const to = setTimeout(() => ac.abort(), 20000);
+      const r = await fetch("https://r.jina.ai/" + T, { headers: { "X-Return-Format": "html" }, signal: ac.signal });
+      clearTimeout(to);
+      if (r.status === 429) { last = "busy"; await new Promise((ok) => setTimeout(ok, 2500)); continue; }
+      const h = await r.text();
+      const m = h.match(/<script id="__NEXT_DATA__"[^>]*>([\s\S]*?)<\/script>/);
+      if (!m) { last = "http404"; continue; }
+      const e = JSON.parse(m[1])?.props?.pageProps?.state?.data?.entity;
+      if (!e || !Array.isArray(e.trackList)) { last = "http404"; continue; }
+      return e;
+    } catch { last = "net"; }
+  }
+  throw new Error(last);
+}
+async function spCover(id) {
+  try {
+    const r = await fetch("https://open.spotify.com/oembed?url=" + encodeURIComponent("https://open.spotify.com/track/" + id));
+    return r.ok ? ((await r.json()).thumbnail_url || "") : "";
+  } catch { return ""; }
+}
+async function loadPlaylist(u, onProg) {
+  const id = parsePlaylist(u); if (!id) throw new Error("link");
+  const e = await fetchEmbed(id);
+  const out = [];
+  for (const t of e.trackList) {
+    const tid = String(t.uri || "").split(":")[2];
+    if (!tid || !/^[A-Za-z0-9]{22}$/.test(tid) || t.isPlayable === false) continue;
+    const artists = String(t.subtitle || "").split(",").map((x) => x.trim()).filter(Boolean).slice(0, 2).join(", ");
+    out.push({ s: "sp", id: tid, t: (artists ? artists + " - " : "") + (t.title || "?"), c: "", isrc: "", pv: (t.audioPreview && t.audioPreview.url) || "", d: Math.round((t.duration || 0) / 1000) });
+  }
+  // copertele, câte 8 deodată
+  let done = 0;
+  for (let i = 0; i < out.length; i += 8) {
+    await Promise.all(out.slice(i, i + 8).map(async (s) => { s.c = await spCover(s.id); done++; }));
+    onProg && onProg(done, out.length);
+  }
+  return { name: e.name || e.title || "Playlist", tracks: out };
+}
+
 // ── randare ─────────────────────────────────────────────────────────────────
 function render() {
   if (!V) return;
@@ -271,7 +382,7 @@ const avatar = (id) => `<span class="av" style="background:${colorOf(id)}">${esc
 function renderLobby() {
   $("#lCode").textContent = room;
   $("#lLink").value = location.origin + location.pathname + "?room=" + room;
-  const n = V.players.length, max = V.cfg.max;
+  const n = V.players.length, max = V.cfg.max, src = V.cfg.src || "mine", pl = V.pl || { n: 0, name: "" };
   $("#lCount").textContent = `${n} / ${max}`;
   let html = V.players.map((p) => `<li class="${online.includes(p.id) ? "" : "off"}">${avatar(p.id)}<span>${esc(p.name)}${p.id === you ? " (tu)" : ""}</span><span class="tag">${p.id === V.host ? "gazdă" : online.includes(p.id) ? "" : "offline"}</span></li>`).join("");
   for (let i = n; i < max; i++) html += `<li class="empty"><span class="av" style="background:var(--s3)"></span>Aștept un jucător…</li>`;
@@ -279,19 +390,55 @@ function renderLobby() {
   const host = isHost();
   $("#lHost").hidden = !host; $("#lGuest").hidden = host;
   const modeTxt = V.cfg.mode === "easy" ? "Easy: alegi piesa dintr-o listă de 5." : "Hard: scrii numele piesei.";
+  const srcTxt = src === "pl" ? `Playlist${pl.name ? " „" + pl.name + "”" : ""}: toți ghiciți aceeași piesă, ${V.cfg.rounds} runde.` : "Fiecare pune 5 piese, ceilalți le ghicesc.";
   if (host) {
     $("#lNums").innerHTML = [2, 3, 4, 5, 6, 7, 8, 9, 10].map((k) => `<button data-n="${k}" class="${k === max ? "on" : ""}" ${k < n ? "disabled" : ""}>${k}</button>`).join("");
     for (const b of document.querySelectorAll("#lModes .pill")) b.classList.toggle("on", b.dataset.mode === V.cfg.mode);
-    $("#lModeHint").textContent = modeTxt;
-    const ready = n === max && n >= 2;
+    for (const b of document.querySelectorAll("#lSrc .pill")) b.classList.toggle("on", b.dataset.src === src);
+    $("#lModeHint").textContent = srcTxt + " " + modeTxt;
+    $("#lPl").hidden = src !== "pl";
+    if (src === "pl") {
+      $("#spLoginBtn").hidden = true;
+      $("#plRow").hidden = false;
+      if (!plBusy) $("#plInfo").textContent = pl.n ? `✓ ${pl.n} piese din „${pl.name}”` : "Lipește linkul unui playlist Spotify (Share → Copy link). Playlistul trebuie să fie public.";
+      $("#lRounds").innerHTML = [5, 10, 15, 20, 30].map((k) => `<button data-r="${k}" class="${k === V.cfg.rounds ? "on" : ""}" ${pl.n && k > pl.n ? "disabled" : ""}>${k}</button>`).join("");
+    }
+    const needPl = src === "pl" && pl.n < 5;
+    const ready = n === max && n >= 2 && !needPl;
     $("#lStart").disabled = !ready;
-    $("#lStart").textContent = ready ? "Începe jocul" : `Aștept jucătorii (${n}/${max})`;
+    $("#lStart").textContent = needPl ? "Încarcă un playlist" : ready ? "Începe jocul" : `Aștept jucătorii (${n}/${max})`;
   } else {
-    $("#lGuest").innerHTML = `<b>Aștept gazda să pornească</b><span class="hint">${max} jucători · ${V.cfg.mode === "easy" ? "Easy" : "Hard"} · ${esc(modeTxt)}</span>`;
+    $("#lGuest").innerHTML = `<b>Aștept gazda să pornească</b><span class="hint">${max} jucători · ${V.cfg.mode === "easy" ? "Easy" : "Hard"} · ${esc(srcTxt)}</span>`;
   }
 }
-$("#lNums").addEventListener("click", (e) => { const b = e.target.closest("button[data-n]"); if (b && !b.disabled) send({ type: "config", max: +b.dataset.n, mode: V.cfg.mode }); });
-$("#lModes").addEventListener("click", (e) => { const b = e.target.closest("[data-mode]"); if (b) send({ type: "config", max: V.cfg.max, mode: b.dataset.mode }); });
+const cfgSend = (patch) => send({ type: "config", max: V.cfg.max, mode: V.cfg.mode, src: V.cfg.src || "mine", rounds: V.cfg.rounds || 10, ...patch });
+$("#lNums").addEventListener("click", (e) => { const b = e.target.closest("button[data-n]"); if (b && !b.disabled) cfgSend({ max: +b.dataset.n }); });
+$("#lModes").addEventListener("click", (e) => { const b = e.target.closest("[data-mode]"); if (b) cfgSend({ mode: b.dataset.mode }); });
+$("#lSrc").addEventListener("click", (e) => { const b = e.target.closest("[data-src]"); if (b) cfgSend({ src: b.dataset.src }); });
+$("#lRounds").addEventListener("click", (e) => { const b = e.target.closest("button[data-r]"); if (b && !b.disabled) cfgSend({ rounds: +b.dataset.r }); });
+$("#spLoginBtn").onclick = () => spLogin();
+let plBusy = false;
+$("#plLoad").onclick = async () => {
+  const u = $("#plUrl").value.trim();
+  if (!u) { $("#plInfo").textContent = "Lipește mai întâi linkul playlistului."; return; }
+  plBusy = true; $("#plLoad").disabled = true; $("#plInfo").textContent = "Încarc playlistul…";
+  try {
+    const p = await loadPlaylist(u, (d, n) => { $("#plInfo").textContent = `Încarc copertele… ${d}/${n}`; });
+    if (p.tracks.length < 5) throw new Error("few");
+    plBusy = false;
+    send({ type: "pool", tracks: p.tracks, name: p.name });
+    if (V.cfg.rounds > p.tracks.length) cfgSend({ rounds: [5, 10, 15, 20, 30].filter((k) => k <= p.tracks.length).pop() || 5 });
+  } catch (e) {
+    plBusy = false;
+    const m = e.message;
+    $("#plInfo").textContent = m === "link" ? "Linkul nu e de playlist. Exemplu: open.spotify.com/playlist/…"
+      : m === "busy" ? "Prea multe încercări într-un minut. Mai încearcă peste câteva secunde."
+      : m === "http404" ? "Nu găsesc playlistul. Verifică linkul și ca playlistul să fie public."
+      : m === "few" ? "Playlistul are mai puțin de 5 piese."
+      : "Nu am putut încărca playlistul. Încearcă din nou.";
+  }
+  $("#plLoad").disabled = false;
+};
 $("#lStart").onclick = () => send({ type: "start", salt: crypto.getRandomValues(new Uint32Array(1))[0] });
 $("#lCopy").onclick = async () => {
   const v = $("#lLink").value;
@@ -302,7 +449,7 @@ $("#lLeave").onclick = () => leave();
 $("#endLeave").onclick = () => leave();
 
 // ── piese (setup) ───────────────────────────────────────────────────────────
-const songs = Array.from({ length: 5 }, () => ({ url: "", s: null, id: null, t: "", d: 0, st: "empty", err: "", edited: false }));
+const songs = Array.from({ length: 5 }, () => ({ url: "", s: null, id: null, t: "", d: 0, c: "", st: "empty", err: "", edited: false }));
 let rowsBuilt = false;
 function parseLink(url) {
   url = url.trim(); let m;
@@ -320,7 +467,7 @@ function cleanTitle(t) {
 }
 function buildRows() {
   if (V.mySongs && songs.every((s) => s.st === "empty")) {
-    V.mySongs.forEach((m, i) => Object.assign(songs[i], { url: m.s === "yt" ? "https://youtu.be/" + m.id : "https://open.spotify.com/track/" + m.id, s: m.s, id: m.id, t: m.t, d: m.d, st: "ok", edited: true }));
+    V.mySongs.forEach((m, i) => Object.assign(songs[i], { url: m.s === "yt" ? "https://youtu.be/" + m.id : "https://open.spotify.com/track/" + m.id, s: m.s, id: m.id, t: m.t, d: m.d, c: m.c || "", st: "ok", edited: true }));
   }
   $("#songRows").innerHTML = songs.map((s, i) => `
     <div class="srow" data-i="${i}"><span class="n">${i + 1}</span><div class="f">
@@ -353,12 +500,12 @@ function paintRows() {
 }
 async function setLink(i, url) {
   const s = songs[i];
-  Object.assign(s, { url, s: null, id: null, d: 0, err: "" });
+  Object.assign(s, { url, s: null, id: null, d: 0, c: "", err: "" });
   if (!s.edited) s.t = "";
   if (!url) { s.st = "empty"; return paintRows(); }
   const p = parseLink(url);
   if (p.err) { s.st = "bad"; s.err = p.err; return paintRows(); }
-  s.s = p.s; s.id = p.id; s.st = "load"; paintRows();
+  s.s = p.s; s.id = p.id; s.st = "load"; s.c = p.s === "yt" ? ytThumb(p.id) : ""; paintRows();
   const myId = s.id;
   if (p.s === "yt") {
     const r = await checkYT(p.id);
@@ -368,9 +515,10 @@ async function setLink(i, url) {
     else if (r.code === 100 || r.code === 2) { s.st = "bad"; s.err = "Video inexistent sau privat"; }
     else { s.st = "ok"; if (!s.t) { const t = await titleFromNoembed(url); if (t && s.id === myId && !s.edited) s.t = cleanTitle(t); } }
   } else {
-    const t = await titleSpotify(p.id);
+    const { t, c } = await titleSpotify(p.id);
     if (s.id !== myId) return;
     if (t && (!s.edited || !s.t)) { s.t = t; s.edited = false; }
+    s.c = c || "";
     s.st = "ok";
   }
   paintRows();
@@ -382,10 +530,10 @@ async function titleSpotify(id) {
       const r = await fetch(api + encodeURIComponent(u)); if (!r.ok) continue;
       const j = await r.json(); if (!j.title) continue;
       const artist = j.author_name && !/spotify/i.test(j.author_name) ? j.author_name : "";
-      return artist && !j.title.includes(artist) ? `${artist} - ${j.title}` : j.title;
+      return { t: artist && !j.title.includes(artist) ? `${artist} - ${j.title}` : j.title, c: j.thumbnail_url || "" };
     } catch {}
   }
-  return "";
+  return { t: "", c: "" };
 }
 async function titleFromNoembed(url) {
   try { const r = await fetch("https://noembed.com/embed?url=" + encodeURIComponent(url)); const j = await r.json(); return j.title || ""; } catch { return ""; }
@@ -406,7 +554,7 @@ $("#readyBtn").onclick = () => {
   if (songs.some((s) => !s.t.trim())) return err("Fiecare piesă are nevoie de titlu (Artist – Titlu).");
   if (new Set(songs.map((s) => s.s + s.id)).size !== 5) return err("Ai pus aceeași piesă de două ori.");
   err("");
-  send({ type: "songs", songs: songs.map((s) => ({ s: s.s, id: s.id, t: s.t.trim(), d: s.d || 0 })) });
+  send({ type: "songs", songs: songs.map((s) => ({ s: s.s, id: s.id, t: s.t.trim(), d: s.d || 0, c: s.c || "" })) });
 };
 $("#editBtn").onclick = () => send({ type: "unready" });
 
@@ -445,8 +593,8 @@ function finishCheck(r) {
 }
 window.addEventListener("yt-ready", () => { if (V?.phase === "setup") ensureChecker(); ensureYT(); });
 
-// ── media: YouTube + Spotify ────────────────────────────────────────────────
-const media = { yt: null, ytReady: false, ytQ: [], sp: null, spCreating: false, cur: null, timer: 0, timer2: 0, raf: 0, want: null, playing: false };
+// ── media: YouTube, Spotify și previzualizări Deezer ────────────────────────
+const media = { yt: null, ytReady: false, ytQ: [], sp: null, spCreating: false, spUri: "", au: null, cur: null, timer: 0, timer2: 0, raf: 0, want: null, playing: false, full: false };
 let volume = 85;
 function ensureYT(cb) {
   if (cb) media.ytQ.push(cb);
@@ -462,10 +610,37 @@ function ensureSP(id, cb) {
   if (media.spCreating) { setTimeout(() => ensureSP(id, cb), 300); return; }
   media.spCreating = true;
   window.__sp.createController($("#spPlayer"), { uri: "spotify:track:" + id, width: "100%", height: 152 }, (ctl) => {
-    media.sp = ctl; media.spCreating = false;
+    media.sp = ctl; media.spCreating = false; media.spUri = "spotify:track:" + id;
     ctl.addListener("playback_update", onSpUpdate);
     cb && cb(true);
   });
+}
+function spLoad(id) {
+  const uri = "spotify:track:" + id;
+  if (media.sp && media.spUri !== uri) { media.sp.loadUri(uri); media.spUri = uri; }
+}
+// Deezer dă gratuit o previzualizare de 30 s pentru aproape orice piesă (căutată după ISRC);
+// cu ea secvențele sunt exacte (0.1 s chiar înseamnă 0.1 s) și nu trebuie cont Spotify.
+const dzCache = {};
+function jsonp(url) {
+  return new Promise((res, rej) => {
+    const cb = "dz" + Math.random().toString(36).slice(2);
+    const s = document.createElement("script");
+    const done = () => { clearTimeout(to); delete window[cb]; s.remove(); };
+    const to = setTimeout(() => { done(); rej(new Error("timeout")); }, 8000);
+    window[cb] = (d) => { done(); res(d); };
+    s.onerror = () => { done(); rej(new Error("err")); };
+    s.src = url + (url.includes("?") ? "&" : "?") + "output=jsonp&callback=" + cb;
+    document.head.append(s);
+  });
+}
+async function deezerPreview(isrc, id) {
+  if (!isrc) return "";
+  if (dzCache[id] !== undefined) return dzCache[id];
+  let u = "";
+  try { const d = await jsonp("https://api.deezer.com/track/isrc:" + encodeURIComponent(isrc)); u = (d && !d.error && d.preview) || ""; } catch {}
+  dzCache[id] = u;
+  return u;
 }
 function startOf(d, f) {
   let st = d * f;
@@ -473,25 +648,30 @@ function startOf(d, f) {
   return Math.floor(st * 10) / 10;
 }
 function prepareMedia(r) {
-  stopSnippet();
-  media.cur = { src: r.src, id: r.id, f: r.f, d: r.d || 0, spDur: 0, spStarted: false, start: null };
+  stopSnippet(true);
+  media.cur = { src: r.src, id: r.id, f: r.f, d: r.d || 0, spDur: 0, spStarted: false, start: null, dz: "" };
   $("#media").classList.remove("open", "yt", "sp"); $("#media").classList.add(r.src);
   $("#ytWrap").hidden = r.src !== "yt"; $("#spWrap").hidden = r.src !== "sp";
   setCover(true, "Piesa e ascunsă");
+  if (!media.au) { media.au = new Audio(); media.au.preload = "auto"; }
+  try { media.au.pause(); } catch {}
   if (r.src === "yt") {
     try { media.sp?.pause(); } catch {}
     ensureYT(() => { if (media.cur?.id !== r.id) return; const st = media.cur.d ? startOf(media.cur.d, r.f) : 0; media.yt.cueVideoById({ videoId: r.id, startSeconds: st }); });
   } else {
     try { media.yt?.stopVideo(); } catch {}
-    ensureSP(r.id, (fresh) => { if (!fresh && media.cur?.id === r.id) media.sp.loadUri("spotify:track:" + r.id); });
+    try { media.sp?.pause(); } catch {}
+    ensureSP(r.id, (fresh) => { if (!fresh && media.cur?.id === r.id) spLoad(r.id); });
+    if (r.pv) { media.cur.dz = r.pv; media.au.src = r.pv; media.au.load(); }
+    else deezerPreview(r.isrc, r.id).then((u) => { if (u && media.cur?.id === r.id) { media.cur.dz = u; media.au.src = u; media.au.load(); } });
   }
 }
 function setCover(on, txt) {
   $("#cover").hidden = !on;
   if (txt) $("#coverTxt").textContent = txt;
 }
-function setPlaying(on) {
-  media.playing = on;
+function setPlaying(on, full = false) {
+  media.playing = on; media.full = on && full;
   $("#playBtn").classList.toggle("on", on);
   $("#cover").classList.toggle("on", on);
   $("#playIco").innerHTML = on ? '<path d="M6 4h4v16H6zM14 4h4v16h-4z"/>' : '<path d="M6 3.5v17a1 1 0 0 0 1.5.86l14-8.5a1 1 0 0 0 0-1.72l-14-8.5A1 1 0 0 0 6 3.5z"/>';
@@ -507,17 +687,42 @@ function animate(len, already = 0) {
   };
   step();
 }
-function stopSnippet() {
+function stopSnippet(force) {
   clearInterval(media.timer); clearTimeout(media.timer2); media.want = null;
-  if (media.playing && V?.phase !== "reveal") {
-    try { if (media.cur?.src === "yt") { media.yt.mute(); media.yt.pauseVideo(); } else media.sp?.pause(); } catch {}
+  if (media.playing || force) {
+    try { media.au?.pause(); } catch {}
+    try { if (media.cur?.src === "yt" && media.ytReady) { if (!media.full) media.yt.mute(); media.yt.pauseVideo(); } } catch {}
+    try { if (media.cur?.src === "sp") media.sp?.pause(); } catch {}
   }
   setPlaying(false);
 }
 function playSnippet(len) {
   const c = media.cur; if (!c) return;
   if (media.playing) { stopSnippet(); return; }
-  if (c.src === "yt") playYT(len); else playSP(len);
+  if (c.src === "yt") playYT(len);
+  else if (c.dz) playAU(len);
+  else playSP(len);
+}
+function playAU(len) {
+  const a = media.au, c = media.cur;
+  setPlaying(true);
+  const go = () => {
+    const d = isFinite(a.duration) && a.duration > 0 ? a.duration : 30;
+    const start = startOf(d, c.f); c.start = start;
+    a.volume = volume / 100; a.muted = false;
+    try { a.currentTime = start; } catch {}
+    let began = false;
+    a.play().catch(() => { stopSnippet(); toast("Browserul a blocat sunetul. Mai apasă o dată pe play."); });
+    const tick = () => {
+      if (!media.playing || media.full) return;
+      const t = a.currentTime;
+      if (!began && !a.paused && t >= start - 0.05) { began = true; animate(len, Math.max(0, t - start)); }
+      if (began && t - start >= len) { a.pause(); stopSnippet(); return; }
+      media.timer2 = setTimeout(tick, 8);
+    };
+    tick();
+  };
+  if (a.readyState >= 1) go(); else a.addEventListener("loadedmetadata", go, { once: true });
 }
 function playYT(len) {
   const p = media.yt, c = media.cur;
@@ -563,6 +768,7 @@ function onSpUpdate(e) {
   const d = e?.data || {}, c = media.cur;
   if (!c || c.src !== "sp") return;
   if (d.duration > 0) c.spDur = d.duration;
+  if (media.full && d.isPaused && d.position > 0 && Math.abs(d.position - d.duration) < 1500) setPlaying(false); // s-a terminat
   const w = media.want; if (!w) return;
   if (!w.seeked) {
     if (c.spDur > 0 && !d.isPaused) { c.start = startOf(c.spDur / 1000, c.f); w.seeked = true; media.sp.seek(c.start); }
@@ -575,84 +781,114 @@ function onSpUpdate(e) {
     media.timer2 = setTimeout(() => { try { media.sp.pause(); } catch {} stopSnippet(); }, Math.max(0, (w.len - el) * 1000));
   }
 }
-function revealPlay() {
-  stopSnippet(); setCover(false);
-  $("#media").classList.add("open");
+// după ce ai răspuns (sau la final de rundă): butonul pornește TOATĂ piesa de la început;
+// a doua apăsare o oprește
+function playFull() {
   const c = media.cur; if (!c) return;
-  if (c.src === "yt" && media.ytReady) {
-    const d = c.d || media.yt.getDuration() || 0;
-    media.yt.unMute(); media.yt.setVolume(volume); media.yt.seekTo(d ? startOf(d, c.f) : 0, true); media.yt.playVideo();
-  } else if (c.src === "sp" && media.sp) {
-    try { if (c.spDur > 0 && c.spStarted) { media.sp.seek(startOf(c.spDur / 1000, c.f)); media.sp.resume(); } else { c.spStarted = true; media.sp.play(); } } catch {}
-  }
+  if (media.playing) { stopSnippet(); return; }
+  stopSnippet(true);
+  showOpen();
+  if (c.src === "yt") {
+    if (!media.ytReady) { toast("Playerul se încarcă, mai apasă o dată."); return; }
+    media.yt.unMute(); media.yt.setVolume(volume); media.yt.seekTo(0, true); media.yt.playVideo();
+    setPlaying(true, true);
+  } else if (media.sp) {
+    spLoad(c.id);
+    try { media.sp.seek(0); media.sp.resume(); if (!c.spStarted) { c.spStarted = true; media.sp.play(); } } catch {}
+    setPlaying(true, true);
+  } else if (c.dz) {
+    const a = media.au; a.currentTime = 0; a.volume = volume / 100; a.play().catch(() => {}); a.onended = () => setPlaying(false);
+    setPlaying(true, true);
+  } else toast("Playerul se încarcă, mai apasă o dată.");
 }
+function showOpen() { setCover(false); $("#media").classList.add("open"); }
 function onMediaError(code) {
   if (V?.phase === "reveal") return;
   stopSnippet();
   setCover(true, code === 101 || code === 150 ? "Piesa nu poate fi redată aici. Apasă „Renunț”." : "Eroare la redare. Apasă „Renunț”.");
 }
-$("#vol").addEventListener("input", (e) => { volume = +e.target.value; try { if (media.ytReady && !media.yt.isMuted()) media.yt.setVolume(volume); } catch {} });
+$("#vol").addEventListener("input", (e) => {
+  volume = +e.target.value;
+  try { if (media.au) media.au.volume = volume / 100; } catch {}
+  try { if (media.ytReady && !media.yt.isMuted()) media.yt.setVolume(volume); } catch {}
+});
 
 // ── rundă ───────────────────────────────────────────────────────────────────
-let lastRoundKey = "", lastStage = -1, revealed = false;
+let lastRoundKey = "", lastStage = -1, revealed = false, wasFull = false;
+const ytThumb = (id) => "https://i.ytimg.com/vi/" + id + "/mqdefault.jpg";
+const MEDAL = ["", "🥇", "🥈", "🥉"];
 function renderRound() {
   const r = V.round, me = V.me, reveal = V.phase === "reveal", st = V.stages, LAST = st.length - 1;
   const key = V.ri + "|" + r.src + r.id + "|" + V.total + "|" + r.f;
   if (key !== lastRoundKey) {
-    lastRoundKey = key; lastStage = me ? me.stage : -1; revealed = false;
+    lastRoundKey = key; lastStage = me ? me.stage : -1; revealed = false; wasFull = false;
     $("#guessInput").value = "";
     prepareMedia(r);
   }
   ensureYT();
   $("#rRoom").textContent = "Camera " + room;
-  $("#rOwner").textContent = r.isOwner ? "Piesa ta" : "Piesa lui " + nameOf(r.owner);
+  $("#rOwner").textContent = r.owner ? (r.isOwner ? "Piesa ta" : "Piesa lui " + nameOf(r.owner)) : "Playlist" + (V.pl && V.pl.name ? " · " + V.pl.name : "");
   $("#rCount").textContent = `${V.ri + 1} / ${V.total}`;
   for (const p of document.querySelectorAll("#rModes .pill")) p.classList.toggle("on", p.classList.contains(V.cfg.mode));
 
+  // după ce ai terminat (sau dacă e piesa ta), butonul verde pornește toată piesa
+  const full = reveal || r.isOwner || !!(me && me.done);
+  if (full && !wasFull) { wasFull = true; stopSnippet(); showOpen(); }
   const stage = me ? me.stage : LAST;
   const len = st[stage];
   $("#barUnl").style.width = pos(len) + "%";
   $("#bar").querySelectorAll(".tk").forEach((t) => t.remove());
   st.slice(0, -1).forEach((s) => { const t = document.createElement("div"); t.className = "tk"; t.style.left = pos(s) + "%"; $("#bar").append(t); });
   $("#barMk").textContent = fmtS(len); $("#barMk").style.left = Math.min(96, Math.max(4, pos(len))) + "%";
-  $("#timeLbl").textContent = fmtS(len);
-  $("#playBtn").disabled = reveal;
-  for (const el of [$(".playrow"), $("#bar"), $(".mk"), $("#rModes")]) el.hidden = reveal;
+  $("#timeLbl").textContent = full ? "toată piesa" : fmtS(len);
+  $(".playrow").classList.toggle("full", full);
+  for (const el of [$("#bar"), $(".mk"), $("#rModes")]) el.hidden = full;
 
   const guessing = !reveal && me && !me.done;
   $("#gHard").hidden = !(guessing && V.cfg.mode === "hard");
   $("#gEasy").hidden = !(guessing && V.cfg.mode === "easy");
   $("#gGive").hidden = !guessing;
-  $("#skipBtn").disabled = $("#skipBtn2").disabled = false;
   for (const b of [$("#skipBtn"), $("#skipBtn2")]) b.lastChild.textContent = stage >= LAST ? "Renunț" : "Skip";
   if (guessing && V.cfg.mode === "easy") {
-    $("#opts").innerHTML = me.opts.map((o) => `<button class="opt ${me.wrong.includes(o.k) ? "wrong" : ""}" data-k="${esc(o.k)}" ${me.wrong.includes(o.k) ? "disabled" : ""}>${esc(o.t)}</button>`).join("");
+    $("#opts").innerHTML = me.opts.map((o) => {
+      const w = me.wrong.includes(o.k);
+      const img = o.c ? `<img src="${esc(o.c)}" alt="" loading="lazy">` : `<span class="noimg">♪</span>`;
+      return `<button class="opt ${w ? "wrong" : ""}" data-k="${esc(o.k)}" ${w ? "disabled" : ""}>${img}<span>${esc(o.t)}</span></button>`;
+    }).join("");
   }
-  $("#myGuesses").innerHTML = me && !reveal ? me.guesses.filter((g) => !g.ok).map((g) => `<div><span class="x">✕ ${esc(g.t)}</span><span>la ${fmtS(st[g.st])}</span></div>`).join("") : "";
+  $("#myGuesses").innerHTML = me && !reveal && !me.done ? me.guesses.filter((g) => !g.ok).map((g) => `<div><span class="x">✕ ${esc(g.t)}</span><span>la ${fmtS(st[g.st])}</span></div>`).join("") : "";
 
   // auto-play când se deblochează o secvență mai lungă (skip sau răspuns greșit)
   if (me && !reveal && !me.done && me.stage > lastStage && lastStage >= 0) { lastStage = me.stage; setTimeout(() => { stopSnippet(); playSnippet(st[me.stage]); }, 60); }
   if (me) lastStage = me.stage;
 
+  const coverUrl = r.cover || (r.src === "yt" && r.title ? ytThumb(r.id) : "");
+  $("#revealHead").hidden = !r.title;
+  if (r.title) {
+    $("#rvCover").hidden = !coverUrl; if (coverUrl) $("#rvCover").src = coverUrl;
+    $("#rvTitle").textContent = r.title;
+    $("#rvOwner").textContent = r.isOwner ? "Piesa ta" : r.owner ? "Piesa aleasă de " + nameOf(r.owner) : (V.pl && V.pl.name ? "din playlistul „" + V.pl.name + "”" : "din playlist");
+  }
+
   const waitingFor = V.others.filter((o) => !o.done).map((o) => nameOf(o.id));
   $("#doneBox").hidden = !(me && me.done && !reveal);
   if (me && me.done && !reveal) {
     $("#doneBox").className = "note" + (me.ok ? " win" : "");
-    $("#doneBox").innerHTML = (me.ok ? `<b>Ai ghicit! +${me.pts}</b>` : `<b>Nu ai ghicit</b>`) + `<span class="hint">Aștept: ${esc(waitingFor.join(", ") || "…")}</span>`;
+    $("#doneBox").innerHTML = (me.ok ? `<b>${MEDAL[me.rank] || ""} Ai ghicit${me.rank ? " al " + me.rank + "-lea" : ""}! +${me.pts}</b>` : `<b>Nu ai ghicit</b>`) + `<span class="hint">Aștept: ${esc(waitingFor.join(", ") || "…")}</span>`;
+    if (me.ok && me.rank === 1) $("#doneBox").querySelector("b").innerHTML = `🥇 Primul! +${me.pts}`;
   }
 
+  const sorted = [...V.others].sort((a, b) => (b.ok - a.ok) || ((a.rank || 99) - (b.rank || 99)) || (b.done - a.done));
+  const judge = r.isOwner || (!r.owner && isHost());
   $("#ownerBox").hidden = !(r.isOwner && !reveal);
   if (r.isOwner && !reveal) {
-    $("#ownerBox").innerHTML = `<div class="hint">Piesa ta, ceilalți ghicesc acum:</div><div class="t">${esc(r.title)}</div>` +
-      `<div class="res">${V.others.map((o) => resultRow(o, true)).join("")}</div>`;
+    $("#ownerBox").innerHTML = `<div class="hint">Piesa ta, ceilalți ghicesc acum</div><div class="res">${sorted.map((o) => resultRow(o, true)).join("")}</div>`;
   }
 
-  $("#revealHead").hidden = !reveal; $("#revealBox").hidden = !reveal;
+  $("#revealBox").hidden = !reveal;
   if (reveal) {
-    if (!revealed) { revealed = true; revealPlay(); }
-    $("#rvTitle").textContent = r.title;
-    $("#rvOwner").textContent = r.isOwner ? "Piesa ta" : "Piesa aleasă de " + nameOf(r.owner);
-    $("#rvRes").innerHTML = V.others.map((o) => resultRow(o, r.isOwner)).join("");
+    if (!revealed) { revealed = true; showOpen(); }
+    $("#rvRes").innerHTML = sorted.map((o) => resultRow(o, judge)).join("");
     const iNext = V.next.includes(you);
     $("#nextBtn").disabled = iNext;
     $("#nextBtn").textContent = (V.ri + 1 >= V.total ? "Vezi clasamentul" : "Următoarea") + ` (${V.next.length}/${V.players.length})`;
@@ -664,24 +900,29 @@ function renderRound() {
   $("#who").innerHTML = V.players.map((p) => {
     const o = V.others.find((x) => x.id === p.id);
     const cls = p.id === r.owner ? "" : o?.done ? (o.ok ? "ok" : "bad") : "";
-    const tag = p.id === r.owner ? "♪" : o?.done ? (o.ok ? "✓" : "✕") : "…";
+    const tag = p.id === r.owner ? "♪" : o?.done ? (o.ok ? (MEDAL[o.rank] || "✓") : "✕") : "…";
     return `<span class="chip ${cls} ${p.id === you ? "me" : ""} ${online.includes(p.id) ? "" : "off"}">${tag} ${esc(p.name)} · ${p.score}</span>`;
   }).join("");
 }
 function resultRow(o, canAccept) {
   const st = V.stages;
+  const place = o.ok && o.rank ? `<span class="rk">${MEDAL[o.rank] || o.rank + "."}</span>` : "";
   const right = o.ok ? `<span class="s v">✓ ${fmtS(st[o.stage])} · +${o.pts}</span>` : o.done ? `<span class="s x">✕</span>` : `<span class="s">ghicește · ${fmtS(st[o.stage])}</span>`;
   let gq = "";
   if (o.guesses && o.guesses.length) {
     gq = `<div class="gq">${o.guesses.map((g, gi) => `<span>${g.ok ? "✓" : "✕"} ${esc(g.t)}</span>${!g.ok && !o.ok && canAccept ? `<button class="acc" data-pid="${esc(o.id)}" data-gi="${gi}">E corect</button>` : ""}`).join("")}</div>`;
   }
-  return `<div class="r">${avatar(o.id)}<span>${esc(nameOf(o.id))}</span>${right}</div>${gq}`;
+  return `<div class="r">${place}${avatar(o.id)}<span>${esc(nameOf(o.id))}</span>${right}</div>${gq}`;
 }
 document.addEventListener("click", (e) => {
   const a = e.target.closest(".acc"); if (a) send({ type: "override", pid: a.dataset.pid, gi: +a.dataset.gi });
   const o = e.target.closest(".opt"); if (o && !o.disabled) send({ type: "pick", key: o.dataset.k });
 });
-$("#playBtn").onclick = () => { if (!V?.round) return; const me = V.me; playSnippet(V.stages[me ? me.stage : V.stages.length - 1]); };
+$("#playBtn").onclick = () => {
+  if (!V?.round) return;
+  const me = V.me, full = V.phase === "reveal" || V.round.isOwner || !!(me && me.done);
+  if (full) playFull(); else playSnippet(V.stages[me ? me.stage : V.stages.length - 1]);
+};
 $("#skipBtn").onclick = $("#skipBtn2").onclick = () => send({ type: "skip" });
 $("#giveBtn").onclick = () => send({ type: "giveup" });
 $("#guessForm").addEventListener("submit", (e) => {
@@ -701,17 +942,20 @@ function renderEnd() {
   const ranked = [...V.players].sort((a, b) => b.score - a.score);
   const top = ranked[0], tie = ranked.length > 1 && ranked[1].score === top.score;
   $("#winT").innerHTML = tie ? "Egalitate!" : `<span>${esc(top.name)}</span> câștigă`;
-  $("#winSub").textContent = `${V.total} piese ghicite · ${V.cfg.mode === "easy" ? "Easy" : "Hard"}`;
+  $("#winSub").textContent = `${V.total} piese · ${V.cfg.mode === "easy" ? "Easy" : "Hard"}${V.cfg.src === "pl" && V.pl.name ? " · " + V.pl.name : ""}`;
   $("#board").innerHTML = ranked.map((p, i) => `<div class="r ${i === 0 ? "first" : ""}"><span class="pl">${i + 1}</span>${avatar(p.id)}<span>${esc(p.name)}${p.id === you ? " (tu)" : ""}</span><span class="sc">${p.score}</span></div>`).join("");
   $("#endHost").hidden = !isHost();
-  $("#endGuest").textContent = isHost() ? "" : "Gazda poate porni o revanșă sau un joc cu piese noi.";
+  $("#newSongsBtn").textContent = V.cfg.src === "pl" ? "Alt playlist / setări" : "Piese noi";
+  $("#rematchBtn").textContent = V.cfg.src === "pl" ? "Încă o tură (alte piese din playlist)" : "Revanșă cu aceleași piese";
+  $("#endGuest").textContent = isHost() ? "" : "Gazda poate porni o revanșă sau un joc nou.";
   $("#recap").innerHTML = (V.hist || []).map((h) => {
-    const got = Object.entries(h.res).filter(([, x]) => x.ok).map(([id, x]) => `${nameOf(id)} (${fmtS(V.stages[x.st])})`);
-    return `<div><span>${esc(h.t)}<small>de la ${esc(nameOf(h.o))}</small></span><span class="g">${got.length ? "✓ " + esc(got.join(", ")) : "nimeni"}</span></div>`;
+    const got = Object.entries(h.res).filter(([, x]) => x.ok).sort((a, b) => (a[1].rank || 99) - (b[1].rank || 99)).map(([id, x]) => `${MEDAL[x.rank] || ""}${nameOf(id)} (${fmtS(V.stages[x.st])})`);
+    const c = h.c || (h.src === "yt" ? ytThumb(h.id) : "");
+    return `<div>${c ? `<img src="${esc(c)}" alt="" loading="lazy">` : ""}<span>${esc(h.t)}<small>${h.o ? "de la " + esc(nameOf(h.o)) : "din playlist"}</small></span><span class="g">${got.length ? esc(got.join(", ")) : "nimeni"}</span></div>`;
   }).join("");
 }
 $("#rematchBtn").onclick = () => send({ type: "rematch", salt: crypto.getRandomValues(new Uint32Array(1))[0] });
-$("#newSongsBtn").onclick = () => { songs.forEach((s) => Object.assign(s, { url: "", s: null, id: null, t: "", d: 0, st: "empty", err: "", edited: false })); send({ type: "newsongs" }); };
+$("#newSongsBtn").onclick = () => { songs.forEach((s) => Object.assign(s, { url: "", s: null, id: null, t: "", d: 0, c: "", st: "empty", err: "", edited: false })); send({ type: "newsongs" }); };
 
 // când revii în pagină (ex. după ce ai trimis codul pe WhatsApp), refacem conexiunea
 document.addEventListener("visibilitychange", () => {
@@ -722,6 +966,7 @@ document.addEventListener("visibilitychange", () => {
 
 // ── pornire ─────────────────────────────────────────────────────────────────
 (async function boot() {
+  if (await spCallback()) return; // fereastra mică de login Spotify se închide singură
   if (!pw || (await sha256(pw)) !== PW_HASH) { show("gate"); setTimeout(() => $("#gatePw").focus(), 50); return; }
   goHome();
 })();

@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
 <title>Ghicește Piesa</title>
 <meta property="og:title" content="Ghicește Piesa">
-<meta property="og:description" content="Joc privat cu prietenii: fiecare pune 5 piese, ceilalți le ghicesc pornind de la 0.1 secunde.">
+<meta property="og:description" content="Joc privat cu prietenii: ghiciți piese din playlistul vostru Spotify sau din piesele puse de fiecare, pornind de la 0.1 secunde.">
 <meta name="theme-color" content="#0a0e0c">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Ccircle cx='32' cy='32' r='30' fill='%231fdf6f'/%3E%3Cpath d='M25 19l22 13-22 13z' fill='%230a0e0c'/%3E%3C/svg%3E">
 <link rel="preconnect" href="https://fonts.googleapis.com">
@@ -169,6 +169,18 @@
   #toast{position:fixed;left:50%;bottom:max(24px,env(safe-area-inset-bottom));transform:translateX(-50%) translateY(20px);background:#202a24;border:1px solid var(--line);color:var(--tx);padding:10px 16px;border-radius:12px;font-size:14px;opacity:0;pointer-events:none;transition:all .2s;z-index:9;max-width:calc(100% - 32px)}
   #toast.on{opacity:1;transform:translateX(-50%)}
   #checker{position:fixed;left:-10000px;top:0;width:240px;height:160px;overflow:hidden}
+  .pill.src{color:var(--tx);background:var(--s2)}
+  .pill.src.on{background:var(--tx);color:#07110b}
+  #lRounds{grid-template-columns:repeat(5,1fr)}
+  .opt{display:flex;align-items:center;gap:12px;padding:8px 12px 8px 8px}
+  .opt img,.opt .noimg{width:46px;height:46px;border-radius:8px;object-fit:cover;flex:none;background:var(--s3);display:grid;place-items:center;color:var(--dim);font-size:18px}
+  .opt.wrong img{filter:grayscale(1)}
+  .reveal img{width:120px;height:120px;border-radius:12px;object-fit:cover;display:block;margin:0 auto 12px;box-shadow:0 8px 30px rgba(0,0,0,.5)}
+  .rk{font:600 14px var(--m);width:22px;text-align:center;flex:none}
+  .recap div{align-items:center}
+  .recap img{width:36px;height:36px;border-radius:6px;object-fit:cover;flex:none}
+  .recap div span:first-child,.recap div img+span{flex:1}
+  .playrow.full .play{width:96px;height:96px}
   .plist .off{opacity:.45}
   .chip.off{opacity:.45}
   .conn{position:fixed;top:10px;right:12px;max-width:calc(100% - 24px);font-size:11px;color:var(--r);background:var(--rbg);padding:4px 10px;border-radius:999px}
@@ -222,6 +234,15 @@
     <div id="lHost">
       <div class="label"><span>Câți jucători</span></div>
       <div class="nums" id="lNums"></div>
+      <div class="label"><span>Ce piese</span></div>
+      <div class="pills" id="lSrc"><button class="pill src" data-src="mine">Piesele noastre</button><button class="pill src" data-src="pl">Playlist Spotify</button></div>
+      <div id="lPl" class="stack" style="margin-top:14px" hidden>
+        <button class="btn wide" id="spLoginBtn">Conectează Spotify</button>
+        <div class="row" id="plRow"><input type="text" id="plUrl" placeholder="Link playlist Spotify" autocomplete="off"><button class="btn" id="plLoad" style="flex:none">Încarcă</button></div>
+        <p class="hint" id="plInfo"></p>
+        <div class="label" style="margin:4px 0 0"><span>Câte runde</span></div>
+        <div class="nums" id="lRounds"></div>
+      </div>
       <div class="label"><span>Dificultate</span></div>
       <div class="pills" id="lModes"><button class="pill easy" data-mode="easy">Easy</button><button class="pill hard" data-mode="hard">Hard</button></div>
       <p class="hint" id="lModeHint" style="text-align:center;margin-top:10px"></p>
@@ -271,7 +292,7 @@
     <div class="note" id="doneBox" hidden></div>
     <div class="owner" id="ownerBox" hidden></div>
 
-    <div class="reveal" id="revealHead" hidden><div class="t" id="rvTitle"></div><div class="o" id="rvOwner"></div></div>
+    <div class="reveal" id="revealHead" hidden><img id="rvCover" alt="" hidden><div class="t" id="rvTitle"></div><div class="o" id="rvOwner"></div></div>
 
     <div class="media" id="media">
       <div class="w" id="ytWrap"><div id="ytPlayer"></div></div>

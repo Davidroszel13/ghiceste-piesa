@@ -1,8 +1,10 @@
 /**
  * Ghicește Piesa — regulile jocului. Rulează în browserul gazdei, care ține starea camerei.
  *
- * Flux: lobby → setup (fiecare își pune 5 piese) → play / reveal (o piesă pe rundă,
- * toți ceilalți ghicesc în paralel) → end.
+ * Două moduri (cfg.src):
+ *   "mine" — fiecare pune 5 piese, ceilalți le ghicesc (lobby → setup → play/reveal → end);
+ *   "pl"   — gazda încarcă un playlist Spotify, toți ghicesc aceeași piesă aleasă la
+ *            întâmplare (lobby → play/reveal → end).
  *
  * Pur și determinist: fără Date.now(), fără Math.random(). Aleatorul vine dintr-un
  * seed ținut în stare (amestecat cu un "salt" trimis de client la start).
@@ -13,6 +15,7 @@ export const meta = { game: "Ghicește Piesa", minPlayers: 1, maxPlayers: 24 };
 const PW_HASH = 1429083844; // hash-ul parolei, nu parola în clar
 const SONGS = 5;
 const MAX_PLAYERS = 10;
+const ROUND_CHOICES = [5, 10, 15, 20, 30];
 const STAGES = [0.1, 0.5, 1, 2, 4, 7, 11, 15];
 const POINTS = [100, 85, 70, 55, 40, 30, 20, 10];
 const LAST = STAGES.length - 1;
@@ -64,25 +67,50 @@ function cleanName(n) {
   return String(n ?? "").replace(/\s+/g, " ").trim().slice(0, 18);
 }
 
+function cleanCover(c) {
+  const v = String(c ?? "");
+  return /^https:\/\/[^\s"'<>]{1,300}$/.test(v) ? v : "";
+}
+
+function cleanSong(s) {
+  if (!s || typeof s !== "object") return null;
+  const src = s.s === "sp" ? "sp" : s.s === "yt" ? "yt" : null;
+  if (!src) return null;
+  const id = String(s.id ?? "");
+  if (src === "yt" && !/^[\w-]{11}$/.test(id)) return null;
+  if (src === "sp" && !/^[A-Za-z0-9]{22}$/.test(id)) return null;
+  const t = String(s.t ?? "").replace(/\s+/g, " ").trim().slice(0, 120);
+  if (!t) return null;
+  const d = Math.max(0, Math.min(36000, Math.round(Number(s.d) || 0)));
+  const isrc = /^[A-Za-z0-9]{8,15}$/.test(String(s.isrc ?? "")) ? String(s.isrc).toUpperCase() : "";
+  const pv = /^https:\/\/p\.scdn\.co\/mp3-preview\/[A-Za-z0-9]{10,80}$/.test(String(s.pv ?? "")) ? String(s.pv) : "";
+  return { s: src, id, t, d, c: cleanCover(s.c), isrc, pv };
+}
+
 function cleanSongs(list) {
   if (!Array.isArray(list) || list.length !== SONGS) return null;
   const out = [];
   const seen = {};
-  for (const s of list) {
-    if (!s || typeof s !== "object") return null;
-    const src = s.s === "sp" ? "sp" : s.s === "yt" ? "yt" : null;
-    if (!src) return null;
-    const id = String(s.id ?? "");
-    if (src === "yt" && !/^[\w-]{11}$/.test(id)) return null;
-    if (src === "sp" && !/^[A-Za-z0-9]{22}$/.test(id)) return null;
-    const t = String(s.t ?? "").replace(/\s+/g, " ").trim().slice(0, 100);
-    if (!t) return null;
-    const d = src === "yt" ? Math.max(0, Math.min(36000, Math.round(Number(s.d) || 0))) : 0;
-    if (seen[src + id]) return null;
-    seen[src + id] = true;
-    out.push({ s: src, id, t, d });
+  for (const raw of list) {
+    const s = cleanSong(raw);
+    if (!s || seen[s.s + s.id]) return null;
+    seen[s.s + s.id] = true;
+    out.push(s);
   }
   return out;
+}
+
+function cleanPool(list) {
+  if (!Array.isArray(list)) return null;
+  const out = [];
+  const seen = {};
+  for (const raw of list.slice(0, 400)) {
+    const s = cleanSong(raw);
+    if (!s || s.s !== "sp" || seen[s.id]) continue;
+    seen[s.id] = true;
+    out.push(s);
+  }
+  return out.length >= SONGS ? out : null;
 }
 
 // ── potrivirea răspunsului scris (Hard) ─────────────────────────────────────
@@ -141,51 +169,68 @@ function matches(guess, title) {
   return cands.some((c) => close(g, c));
 }
 
-// ── rundă ───────────────────────────────────────────────────────────────────
+// ── piese și runde ──────────────────────────────────────────────────────────
 
-const keyOf = (s, owner, i) => s.order.indexOf(owner) + "-" + i;
+const keyOfRound = (s, r) => (r.o ? s.order.indexOf(r.o) + "-" + r.i : "p" + r.p);
 
 function songByKey(s, key) {
-  const [oi, i] = String(key).split("-").map(Number);
+  const k = String(key);
+  if (k[0] === "p") {
+    const song = s.pool[Number(k.slice(1))];
+    return song ? { owner: null, song } : null;
+  }
+  const [oi, i] = k.split("-").map(Number);
   const owner = s.order[oi];
   const p = owner ? s.players[owner] : null;
   const song = p && p.songs ? p.songs[i] : null;
-  return song ? { owner, i, song } : null;
+  return song ? { owner, song } : null;
 }
+
+const songOfRound = (s, r) => (r.o ? s.players[r.o].songs[r.i] : s.pool[r.p]);
 
 function newCur(s) {
   const r = s.rounds[s.ri];
   const rand = makeRand(s.seed);
-  const correct = keyOf(s, r.o, r.i);
+  const correct = keyOfRound(s, r);
   const gs = {};
   for (const pid of s.order) {
     if (pid === r.o) continue;
     let opts = null;
     if (s.cfg.mode === "easy") {
       const pool = [];
-      for (const oid of s.order) {
-        if (oid === pid) continue;
-        for (let i = 0; i < SONGS; i++) {
-          const k = keyOf(s, oid, i);
-          if (k !== correct) pool.push(k);
+      if (s.cfg.src === "pl") {
+        for (let i = 0; i < s.pool.length; i++) if ("p" + i !== correct) pool.push("p" + i);
+      } else {
+        for (const oid of s.order) {
+          if (oid === pid) continue;
+          for (let i = 0; i < SONGS; i++) {
+            const k = s.order.indexOf(oid) + "-" + i;
+            if (k !== correct) pool.push(k);
+          }
         }
       }
       opts = shuffle(shuffle(pool, rand).slice(0, 4).concat([correct]), rand);
     }
-    gs[pid] = { stage: 0, done: false, ok: false, pts: 0, guesses: [], wrong: [], opts };
+    gs[pid] = { stage: 0, done: false, ok: false, pts: 0, rank: 0, guesses: [], wrong: [], opts };
   }
   s.seed = rand.seed;
-  s.cur = { gs, next: [] };
+  s.cur = { gs, next: [], okN: 0 };
 }
 
 function buildRounds(s) {
   const rand = makeRand(s.seed);
-  const owners = shuffle(s.order, rand);
-  const perm = {};
-  for (const o of owners) perm[o] = shuffle([0, 1, 2, 3, 4], rand);
   const rounds = [];
-  for (let i = 0; i < SONGS; i++) {
-    for (const o of owners) rounds.push({ o, i: perm[o][i], f: Math.round((0.42 + rand.next() * 0.16) * 1000) / 1000 });
+  const f = () => Math.round((0.42 + rand.next() * 0.16) * 1000) / 1000;
+  if (s.cfg.src === "pl") {
+    const idx = shuffle(s.pool.map((_, i) => i), rand).slice(0, Math.min(s.cfg.rounds, s.pool.length));
+    for (const p of idx) rounds.push({ o: null, i: 0, p, f: f() });
+  } else {
+    const owners = shuffle(s.order, rand);
+    const perm = {};
+    for (const o of owners) perm[o] = shuffle([0, 1, 2, 3, 4], rand);
+    for (let i = 0; i < SONGS; i++) {
+      for (const o of owners) rounds.push({ o, i: perm[o][i], p: -1, f: f() });
+    }
   }
   s.seed = rand.seed;
   s.rounds = rounds;
@@ -203,8 +248,8 @@ function maybeReveal(s) {
 function advance(s) {
   const r = s.rounds[s.ri];
   const res = {};
-  for (const [pid, g] of Object.entries(s.cur.gs)) res[pid] = { ok: g.ok, pts: g.pts, st: g.stage };
-  s.hist.push({ o: r.o, i: r.i, res });
+  for (const [pid, g] of Object.entries(s.cur.gs)) res[pid] = { ok: g.ok, pts: g.pts, st: g.stage, rank: g.rank };
+  s.hist.push({ o: r.o, i: r.i, p: r.p, res });
   s.ri += 1;
   if (s.ri >= s.rounds.length) {
     s.phase = "end";
@@ -213,6 +258,16 @@ function advance(s) {
     s.phase = "play";
     newCur(s);
   }
+}
+
+function markCorrect(s, pid, g, stage) {
+  g.done = true;
+  g.ok = true;
+  g.stage = stage;
+  g.pts = POINTS[stage];
+  s.cur.okN += 1;
+  g.rank = s.cur.okN;
+  s.players[pid].score += g.pts;
 }
 
 function wrongAnswer(g, text) {
@@ -225,11 +280,13 @@ function wrongAnswer(g, text) {
 
 export function setup(players) {
   return {
-    v: 1,
+    v: 2,
     seed: hash((players || []).join(",")),
     host: null,
     phase: "lobby",
-    cfg: { max: 2, mode: "easy" },
+    cfg: { max: 2, mode: "easy", src: "mine", rounds: 10 },
+    pool: [],
+    poolName: "",
     players: {},
     order: [],
     rounds: [],
@@ -266,12 +323,20 @@ export function validateAction(state, pid, a) {
       if (!Number.isInteger(max) || max < 2 || max > MAX_PLAYERS) return bad("Între 2 și 10 jucători");
       if (max < state.order.length) return bad("Sunt deja mai mulți jucători în cameră");
       if (a.mode !== "easy" && a.mode !== "hard") return bad("Dificultate invalidă");
+      if (a.src !== undefined && a.src !== "mine" && a.src !== "pl") return bad("Sursă invalidă");
+      if (a.rounds !== undefined && !ROUND_CHOICES.includes(Number(a.rounds))) return bad("Număr de runde invalid");
       return ok();
     }
+    case "pool":
+      if (!isHost) return bad("Doar gazda alege playlistul");
+      if (state.phase !== "lobby") return bad("Jocul a început deja");
+      if (!cleanPool(a.tracks)) return bad("Playlistul trebuie să aibă cel puțin 5 piese");
+      return ok();
     case "start":
       if (!isHost) return bad("Doar gazda pornește jocul");
       if (state.phase !== "lobby") return bad("Jocul a început deja");
       if (state.order.length < 2 || state.order.length !== state.cfg.max) return bad("Așteaptă să intre toți jucătorii");
+      if (state.cfg.src === "pl" && state.pool.length < SONGS) return bad("Încarcă mai întâi un playlist");
       return ok();
     case "songs":
       if (state.phase !== "setup") return bad("Nu e momentul pentru piese");
@@ -300,7 +365,8 @@ export function validateAction(state, pid, a) {
       return ok();
     case "override": {
       if (state.phase !== "play" && state.phase !== "reveal") return bad("Nu e momentul");
-      if (!r || r.o !== pid) return bad("Doar cel care a ales piesa poate accepta un răspuns");
+      const judge = r && (r.o ? r.o === pid : isHost);
+      if (!judge) return bad(r && r.o ? "Doar cel care a ales piesa poate accepta un răspuns" : "Doar gazda poate accepta un răspuns");
       const tg = state.cur.gs[a.pid];
       if (!tg || tg.ok) return bad("Nimic de acceptat");
       const gi = Number(a.gi);
@@ -324,6 +390,9 @@ export function validateAction(state, pid, a) {
 
 export function applyAction(state, pid, a) {
   const s = clone(state);
+  if (!s.pool) s.pool = [];
+  if (!s.cfg.src) s.cfg.src = "mine";
+  if (!s.cfg.rounds) s.cfg.rounds = 10;
   const me = s.players[pid];
   const r = s.rounds[s.ri];
   const g = s.cur && s.cur.gs[pid];
@@ -339,12 +408,22 @@ export function applyAction(state, pid, a) {
       break;
     }
     case "config":
-      s.cfg = { max: Number(a.max), mode: a.mode };
+      s.cfg = {
+        max: Number(a.max),
+        mode: a.mode,
+        src: a.src === "pl" ? "pl" : a.src === "mine" ? "mine" : s.cfg.src,
+        rounds: a.rounds !== undefined ? Number(a.rounds) : s.cfg.rounds,
+      };
+      break;
+    case "pool":
+      s.pool = cleanPool(a.tracks);
+      s.poolName = String(a.name ?? "").replace(/\s+/g, " ").trim().slice(0, 80);
       break;
     case "start":
       s.seed = (s.seed ^ hash(String(a.salt ?? ""))) >>> 0;
-      s.phase = "setup";
       for (const id of s.order) s.players[id].ready = false;
+      if (s.cfg.src === "pl") buildRounds(s);
+      else s.phase = "setup";
       break;
     case "songs":
       me.songs = cleanSongs(a.songs);
@@ -362,26 +441,20 @@ export function applyAction(state, pid, a) {
       g.done = true;
       break;
     case "guess": {
-      const song = s.players[r.o].songs[r.i];
+      const song = songOfRound(s, r);
       const text = String(a.text).trim().slice(0, 80);
       if (matches(text, song.t)) {
         g.guesses.push({ t: text, ok: true, st: g.stage });
-        g.done = true;
-        g.ok = true;
-        g.pts = POINTS[g.stage];
-        me.score += g.pts;
+        markCorrect(s, pid, g, g.stage);
       } else wrongAnswer(g, text);
       break;
     }
     case "pick": {
-      const correct = keyOf(s, r.o, r.i);
+      const correct = keyOfRound(s, r);
       const picked = songByKey(s, a.key);
       if (a.key === correct) {
         g.guesses.push({ t: picked.song.t, ok: true, st: g.stage });
-        g.done = true;
-        g.ok = true;
-        g.pts = POINTS[g.stage];
-        me.score += g.pts;
+        markCorrect(s, pid, g, g.stage);
       } else {
         g.wrong.push(a.key);
         wrongAnswer(g, picked ? picked.song.t : "?");
@@ -392,11 +465,7 @@ export function applyAction(state, pid, a) {
       const tg = s.cur.gs[a.pid];
       const gu = tg.guesses[Number(a.gi)];
       gu.ok = true;
-      tg.ok = true;
-      tg.done = true;
-      tg.pts = POINTS[gu.st];
-      tg.stage = gu.st;
-      s.players[a.pid].score += tg.pts;
+      markCorrect(s, a.pid, tg, gu.st);
       break;
     }
     case "force":
@@ -413,12 +482,12 @@ export function applyAction(state, pid, a) {
       buildRounds(s);
       break;
     case "newsongs":
-      s.phase = "setup";
       s.rounds = [];
       s.ri = 0;
       s.cur = null;
       s.hist = [];
       for (const id of s.order) Object.assign(s.players[id], { ready: false, songs: null, score: 0 });
+      s.phase = s.cfg.src === "pl" ? "lobby" : "setup";
       break;
   }
   maybeReveal(s);
@@ -433,9 +502,10 @@ export function isGameOver() {
 
 export function viewFor(state, pid) {
   const me = state.players[pid];
+  const pool = state.pool || [];
   const view = {
     phase: state.phase,
-    cfg: state.cfg,
+    cfg: { src: "mine", rounds: 10, ...state.cfg },
     host: state.host,
     joined: !!me,
     players: state.order.map((id) => ({
@@ -444,6 +514,7 @@ export function viewFor(state, pid) {
       score: state.players[id].score,
       ready: state.players[id].ready,
     })),
+    pl: { n: pool.length, name: state.poolName || "" },
     total: state.rounds.length,
     ri: state.ri,
     stages: STAGES,
@@ -455,34 +526,52 @@ export function viewFor(state, pid) {
 
   if ((state.phase === "play" || state.phase === "reveal") && state.cur) {
     const r = state.rounds[state.ri];
-    const song = state.players[r.o].songs[r.i];
+    const song = songOfRound(state, r);
+    const g = state.cur.gs[pid];
     const isOwner = r.o === pid;
     const open = isOwner || state.phase === "reveal";
-    view.round = { owner: r.o, f: r.f, src: song.s, id: song.id, d: song.d, title: open ? song.t : null, isOwner };
-    const g = state.cur.gs[pid];
+    const mineOpen = open || (g && g.done);
+    view.round = {
+      owner: r.o,
+      f: r.f,
+      src: song.s,
+      id: song.id,
+      d: song.d,
+      isrc: song.isrc || "",
+      pv: song.pv || "",
+      title: mineOpen ? song.t : null,
+      cover: mineOpen ? song.c || "" : "",
+      isOwner,
+    };
     view.me = g
       ? {
           stage: g.stage,
           done: g.done,
           ok: g.ok,
           pts: g.pts,
+          rank: g.rank,
           guesses: g.guesses,
           wrong: g.wrong,
-          opts: g.opts ? g.opts.map((k) => ({ k, t: (songByKey(state, k) || { song: { t: "?" } }).song.t })) : null,
+          opts: g.opts
+            ? g.opts.map((k) => {
+                const x = songByKey(state, k);
+                return { k, t: x ? x.song.t : "?", c: x ? x.song.c || "" : "" };
+              })
+            : null,
         }
       : null;
     view.others = Object.entries(state.cur.gs).map(([id, x]) =>
       open
-        ? { id, done: x.done, ok: x.ok, pts: x.pts, stage: x.stage, guesses: x.guesses }
-        : { id, done: x.done, ok: x.ok, stage: x.stage, n: x.guesses.length },
+        ? { id, done: x.done, ok: x.ok, pts: x.pts, rank: x.rank, stage: x.stage, guesses: x.guesses }
+        : { id, done: x.done, ok: x.ok, rank: x.rank, stage: x.stage, n: x.guesses.length },
     );
     view.next = state.cur.next;
   }
 
   if (state.phase === "end") {
     view.hist = state.hist.map((h) => {
-      const song = state.players[h.o].songs[h.i];
-      return { o: h.o, t: song.t, src: song.s, id: song.id, res: h.res };
+      const song = h.o ? state.players[h.o].songs[h.i] : pool[h.p];
+      return { o: h.o, t: song.t, c: song.c || "", src: song.s, id: song.id, res: h.res };
     });
   }
   return view;
