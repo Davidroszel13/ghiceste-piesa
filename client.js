@@ -1,5 +1,5 @@
 // Ghicește Piesa — clientul. Gazda (cine creează camera) rulează regulile din logic.js
-// în browser și trimite fiecăruia starea lui prin PeerJS (WebRTC). Audio se redă local.
+// în browser și trimite fiecăruia starea lui printr-un releu MQTT. Audio se redă local.
 
 import * as logic from "./logic.js";
 
@@ -53,46 +53,47 @@ const names = () => Object.fromEntries((V?.players || []).map((p, i) => [p.id, {
 const nameOf = (id) => names()[id]?.name || "?";
 const colorOf = (id) => COLORS[(names()[id]?.i ?? 0) % COLORS.length];
 
-// ── conexiune (PeerJS) ──────────────────────────────────────────────────────
-const PREFIX = "ghiceste-piesa-v2-";
-const PEER_OPTS = window.PEER_OPTS || { debug: 1 };
-const net = { mode: null, peer: null, conns: new Map(), hostConn: null, joinT: 0 };
+// ── conexiune (releu MQTT) ──────────────────────────────────────────────────
+// Toate mesajele trec printr-un broker MQTT public (prin internet, fără conexiune
+// directă între dispozitive), așa că merge indiferent de rețea: Wi-Fi, date mobile etc.
+const BROKER = window.GP_BROKER || "wss://broker.emqx.io:8084/mqtt";
+const TOPIC = (r) => "ghiceste-piesa/v3/" + r;
+const net = { mode: null, client: null, joinT: 0, hbT: 0, misses: 0, seq: 0, ver: 0, myVer: -1, hostAlive: 0, lastSeen: {}, lastSeq: {} };
 let H = null; // doar la gazdă: { state }
 let online = [];
 const hostKey = (r) => "gp:host:" + r;
 function connStatus(txt) { $("#conn").hidden = !txt; if (txt) $("#conn").textContent = txt; }
+function pub(topic, obj, qos = 1) { try { if (net.client?.connected) net.client.publish(topic, JSON.stringify(obj), { qos }); } catch {} }
+function mqttConnect(onReady, onMsg) {
+  const c = mqtt.connect(BROKER, {
+    clientId: "gp_" + playerId() + "_" + Math.random().toString(36).slice(2, 7),
+    clean: true, reconnectPeriod: 2000, connectTimeout: 10000, keepalive: 30,
+  });
+  net.client = c;
+  c.on("connect", () => { connStatus(""); onReady(c); });
+  c.on("reconnect", () => { if (!leaving) connStatus("reconectare…"); });
+  c.on("offline", () => { if (!leaving) connStatus("fără internet, reîncerc…"); });
+  c.on("error", () => {});
+  c.on("message", (topic, payload) => { let m; try { m = JSON.parse(payload.toString()); } catch { return; } if (m && typeof m === "object") onMsg(topic, m); });
+  return c;
+}
 
+// ---- gazda: ține starea și o trimite fiecăruia
 function startHost(restored) {
   net.mode = "host"; leaving = false; helloSent = false;
   if (creating) { try { for (const k of Object.keys(localStorage)) if (k.startsWith("gp:host:")) localStorage.removeItem(k); } catch {} }
   H = { state: restored || logic.setup([playerId()]) };
-  openHostPeer(0);
+  net.lastSeen = {}; net.lastSeq = {};
+  mqttConnect((c) => {
+    c.subscribe(TOPIC(room) + "/h", { qos: 1 });
+    setUrl(); hostSync();
+  }, (topic, m) => { if (topic === TOPIC(room) + "/h") onHostData(m); });
+  clearInterval(net.hbT);
+  net.hbT = setInterval(() => { const before = online.join(); computeOnline(); if (online.join() !== before) hostSync(); }, 5000);
 }
-function openHostPeer(tries) {
-  const peer = new Peer(PREFIX + room, PEER_OPTS);
-  net.peer = peer;
-  peer.on("open", () => { connStatus(""); setUrl(); hostSync(); });
-  peer.on("connection", (conn) => {
-    conn.on("data", (m) => onHostData(conn, m));
-    const drop = () => { if (net.conns.delete(conn)) hostSync(); };
-    conn.on("close", drop); conn.on("error", drop);
-  });
-  peer.on("disconnected", () => { if (!peer.destroyed && !leaving) { connStatus("reconectare…"); setTimeout(() => { try { if (!peer.destroyed) peer.reconnect(); } catch {} }, 1500); } });
-  peer.on("error", (e) => {
-    if (leaving || net.peer !== peer) return;
-    if (e.type === "unavailable-id") {
-      peer.destroy();
-      if (creating) { room = randCode(); openHostPeer(0); return; }
-      if (tries < 10) { connStatus("redeschid camera…"); setTimeout(() => openHostPeer(tries + 1), 2000); }
-      else leave("Nu pot redeschide camera. Mai încearcă peste un minut.");
-      return;
-    }
-    if (["network", "server-error", "socket-error", "socket-closed", "browser-incompatible"].includes(e.type)) {
-      connStatus("fără conexiune, reîncerc…");
-      if (!V && tries >= 3) { leave("Nu mă pot conecta la serverul de joc. Verifică internetul."); return; }
-      if (e.type !== "browser-incompatible") setTimeout(() => { if (net.peer === peer && !leaving) { peer.destroy(); openHostPeer(tries + 1); } }, 2500);
-    }
-  });
+function computeOnline() {
+  const now = Date.now();
+  online = [playerId(), ...Object.keys(net.lastSeen).filter((p) => now - net.lastSeen[p] < 25000)];
 }
 function hostApply(pid, action) {
   const v = logic.validateAction(H.state, pid, action);
@@ -102,86 +103,88 @@ function hostApply(pid, action) {
   hostSync();
   return v;
 }
+function sendStateTo(pid) {
+  pub(TOPIC(room) + "/p/" + pid, { type: "state", you: pid, online, ver: net.ver, view: logic.viewFor(H.state, pid) });
+}
 function hostSync() {
   if (!H) return;
   const me = playerId();
-  online = [me, ...[...net.conns].filter(([c]) => c.open).map(([, pid]) => pid)];
-  for (const [conn, pid] of net.conns) {
-    if (!conn.open) continue;
-    try { conn.send({ type: "state", you: pid, online, view: logic.viewFor(H.state, pid) }); } catch {}
-  }
+  net.ver++; computeOnline();
+  const targets = new Set([...H.state.order, ...Object.keys(net.lastSeen)]);
+  targets.delete(me);
+  for (const pid of targets) sendStateTo(pid);
   onState({ you: me, online, view: logic.viewFor(H.state, me) });
 }
-function onHostData(conn, m) {
-  if (!m || typeof m !== "object") return;
-  if (m.type === "join") {
-    const pid = String(m.playerId ?? "").slice(0, 64);
-    if (!pid || pid === playerId()) return;
-    for (const [c, p] of net.conns) if (p === pid && c !== conn) { net.conns.delete(c); try { c.close(); } catch {} }
-    net.conns.set(conn, pid); hostSync();
+function onHostData(m) {
+  const pid = String(m.pid ?? "").slice(0, 64);
+  if (!pid || pid === playerId()) return;
+  const fresh = !net.lastSeen[pid] || Date.now() - net.lastSeen[pid] > 25000;
+  net.lastSeen[pid] = Date.now();
+  if (m.type === "join" || m.type === "hb") {
+    if (fresh) hostSync();
+    else if (m.ver !== net.ver) sendStateTo(pid);
+    else pub(TOPIC(room) + "/p/" + pid, { type: "pong" }, 0);
   } else if (m.type === "action") {
-    const pid = net.conns.get(conn); if (!pid) return;
+    const seq = Number(m.seq) || 0;
+    if (seq <= (net.lastSeq[pid] || 0)) return; // duplicat
+    net.lastSeq[pid] = seq;
     let size = 0; try { size = JSON.stringify(m.action).length; } catch { return; }
     if (size > 6000) return;
+    if (fresh) computeOnline();
     const r = hostApply(pid, m.action);
-    if (!r.ok) try { conn.send({ type: "error", error: r.error || "acțiune invalidă" }); } catch {}
+    if (!r.ok) pub(TOPIC(room) + "/p/" + pid, { type: "error", error: r.error || "acțiune invalidă" });
   }
 }
 
+// ---- invitatul: trimite acțiuni, primește starea lui
 function startGuest() {
-  net.mode = "guest"; leaving = false; helloSent = false; net.misses = 0;
+  net.mode = "guest"; leaving = false; helloSent = false; net.misses = 0; net.hostAlive = 0; net.myVer = -1;
+  net.seq = Date.now();
   $("#homeErr").style.color = "var(--mut)"; $("#homeErr").textContent = "Mă conectez la camera " + room + "…";
-  const peer = new Peer(PEER_OPTS);
-  net.peer = peer;
-  peer.on("open", () => connectHost());
-  peer.on("disconnected", () => { if (!peer.destroyed && !leaving) setTimeout(() => { try { if (!peer.destroyed) peer.reconnect(); } catch {} }, 1500); });
-  peer.on("error", (e) => {
-    if (leaving || net.peer !== peer) return;
-    if (e.type === "peer-unavailable") {
-      if (!V) $("#homeErr").textContent = "Camera " + room + " nu e deschisă acum. Gazda trebuie să aibă jocul deschis pe ecran. Mai încerc…";
-      if (!V && ++net.misses > 10) { leave("Nu găsesc camera " + room + ". Verifică codul și ca gazda să aibă pagina jocului deschisă."); return; }
-      connStatus(V ? "Gazda e offline, aștept…" : "Caut camera " + room + "…"); setTimeout(() => { if (!leaving && net.peer === peer) connectHost(); }, 3000);
-    } else if (["network", "server-error", "socket-error", "socket-closed"].includes(e.type)) {
-      connStatus("fără conexiune, reîncerc…");
-      setTimeout(() => { if (!leaving && net.peer === peer) { peer.destroy(); startGuest(); } }, 3000);
-    }
-  });
-  clearTimeout(net.joinT);
-  net.joinT = setTimeout(() => { if (!V && !leaving && net.mode === "guest") leave("Nu mă pot conecta la camera " + room + ". Verifică codul și ca gazda să aibă pagina deschisă."); }, 40000);
-}
-function connectHost() {
-  const conn = net.peer.connect(PREFIX + room, { reliable: true });
-  net.hostConn = conn;
-  conn.on("open", () => { connStatus(""); conn.send({ type: "join", playerId: playerId() }); });
-  conn.on("data", (m) => {
-    if (!m || typeof m !== "object") return;
-    if (m.type === "state") onState(m);
+  const myTopic = TOPIC(room) + "/p/" + playerId();
+  const sendJoin = () => pub(TOPIC(room) + "/h", { type: "join", pid: playerId(), ver: -1 });
+  mqttConnect((c) => { c.subscribe(myTopic, { qos: 1 }, () => sendJoin()); }, (topic, m) => {
+    if (topic !== myTopic) return;
+    net.hostAlive = Date.now();
+    if (V) connStatus("");
+    if (m.type === "state") { net.myVer = m.ver; onState(m); }
     else if (m.type === "error") onError(m.error);
     else if (m.type === "closed") leave("Gazda a închis camera.");
   });
-  conn.on("close", () => {
-    if (net.hostConn !== conn || leaving) return;
-    connStatus("Gazda e offline, aștept…");
-    setTimeout(() => { if (net.hostConn === conn && !leaving) connectHost(); }, 2500);
-  });
+  clearInterval(net.joinT);
+  net.joinT = setInterval(() => {
+    if (V || leaving || net.mode !== "guest") { clearInterval(net.joinT); return; }
+    net.misses++;
+    if (net.misses >= 2) $("#homeErr").textContent = "Camera " + room + " nu e deschisă acum. Gazda trebuie să aibă jocul deschis pe ecran. Mai încerc…";
+    if (net.misses > 12) { leave("Nu găsesc camera " + room + ". Verifică codul și ca gazda să aibă pagina jocului deschisă."); return; }
+    sendJoin();
+  }, 3000);
+  clearInterval(net.hbT);
+  net.hbT = setInterval(() => {
+    if (!V || leaving) return;
+    pub(TOPIC(room) + "/h", { type: "hb", pid: playerId(), ver: net.myVer }, 0);
+    if (Date.now() - net.hostAlive > 25000) connStatus("Gazda e offline, aștept…");
+  }, 8000);
 }
 function send(action) {
   if (net.mode === "host" && H) {
     const r = hostApply(playerId(), action);
     if (!r.ok) onError(r.error || "acțiune invalidă");
-  } else if (net.hostConn?.open) net.hostConn.send({ type: "action", action });
-  else toast("Nu ești conectat. Încerc din nou…");
+  } else if (net.client?.connected) {
+    net.seq += 1;
+    pub(TOPIC(room) + "/h", { type: "action", pid: playerId(), seq: net.seq, action });
+  } else toast("Nu ești conectat. Încerc din nou…");
 }
 function leave(msg) {
   leaving = true;
-  if (net.mode === "host") {
-    for (const [c] of net.conns) { try { c.send({ type: "closed" }); } catch {} }
+  if (net.mode === "host" && H) {
+    for (const pid of new Set([...H.state.order, ...Object.keys(net.lastSeen)])) if (pid !== playerId()) pub(TOPIC(room) + "/p/" + pid, { type: "closed" }, 0);
     if (!msg) store.del(hostKey(room));
   }
-  const peer = net.peer;
-  setTimeout(() => { try { peer?.destroy(); } catch {} }, 300);
-  net.peer = null; net.hostConn = null; net.conns = new Map(); net.mode = null; H = null;
-  clearTimeout(net.joinT);
+  const c = net.client;
+  setTimeout(() => { try { c?.end(true); } catch {} }, 400);
+  clearInterval(net.joinT); clearInterval(net.hbT);
+  net.client = null; net.mode = null; H = null;
   V = null; room = ""; creating = false; connStatus("");
   history.replaceState(null, "", location.pathname);
   stopSnippet(); try { media.yt?.stopVideo(); } catch {} try { media.sp?.pause(); } catch {}
@@ -195,7 +198,7 @@ function onState(msg) {
     if (!helloSent) { helloSent = true; send({ type: "hello", name: store.get("gp:name"), pw }); }
     return;
   }
-  creating = false; clearTimeout(net.joinT); V = view; render();
+  creating = false; clearInterval(net.joinT); V = view; render();
 }
 function onError(err) {
   if (!V) { // eroare la intrare
@@ -712,15 +715,9 @@ $("#newSongsBtn").onclick = () => { songs.forEach((s) => Object.assign(s, { url:
 
 // când revii în pagină (ex. după ce ai trimis codul pe WhatsApp), refacem conexiunea
 document.addEventListener("visibilitychange", () => {
-  const p = net.peer;
-  if (document.hidden || leaving || !p) return;
-  if (net.mode === "host") {
-    if (p.destroyed) openHostPeer(0);
-    else if (p.disconnected) { try { p.reconnect(); } catch {} }
-  } else if (net.mode === "guest") {
-    if (p.disconnected && !p.destroyed) { try { p.reconnect(); } catch {} }
-    else if (p.open && !net.hostConn?.open) connectHost();
-  }
+  if (document.hidden || leaving || !net.client) return;
+  if (!net.client.connected) { try { net.client.reconnect(); } catch {} }
+  else if (net.mode === "guest" && V) pub(TOPIC(room) + "/h", { type: "hb", pid: playerId(), ver: -2 }, 0);
 });
 
 // ── pornire ─────────────────────────────────────────────────────────────────

@@ -313,7 +313,7 @@
   window.onYouTubeIframeAPIReady = function () { window.__yt = true; window.dispatchEvent(new Event("yt-ready")); };
   window.onSpotifyIframeApiReady = function (api) { window.__sp = api; window.dispatchEvent(new Event("sp-ready")); };
 </script>
-<script src="https://cdn.jsdelivr.net/npm/peerjs@1.5.4/dist/peerjs.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/mqtt@5.16.0/dist/mqtt.min.js"></script>
 <script src="https://www.youtube.com/iframe_api" async></script>
 <script src="https://open.spotify.com/embed/iframe-api/v1" async></script>
 <script type="module" src="client.js"></script>
