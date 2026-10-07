@@ -16,11 +16,13 @@ const fmtS = (s) => (s < 1 ? s.toFixed(1) : String(s)) + "s";
 const pos = (s) => Math.sqrt(Math.max(0, s) / 15) * 100; // scară neliniară, ca primele secunde să se vadă
 const START_TAIL = 16;
 
+let PID = "";
 function playerId() {
-  const key = "hf:game:playerId";
-  let id = store.get(key);
-  if (!id) { id = Math.random().toString(36).slice(2, 12); store.set(key, id); }
-  return id;
+  // un id per tab (sessionStorage), ca două tab-uri din același browser să fie jucători diferiți
+  if (PID) return PID;
+  try { PID = sessionStorage.getItem("gp:pid") || ""; } catch {}
+  if (!PID) { PID = Math.random().toString(36).slice(2, 12); try { sessionStorage.setItem("gp:pid", PID); } catch {} }
+  return PID;
 }
 async function sha256(t) {
   const buf = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(t));
@@ -127,7 +129,7 @@ function onHostData(conn, m) {
 }
 
 function startGuest() {
-  net.mode = "guest"; leaving = false; helloSent = false;
+  net.mode = "guest"; leaving = false; helloSent = false; net.misses = 0;
   const peer = new Peer(PEER_OPTS);
   net.peer = peer;
   peer.on("open", () => connectHost());
@@ -135,15 +137,15 @@ function startGuest() {
   peer.on("error", (e) => {
     if (leaving || net.peer !== peer) return;
     if (e.type === "peer-unavailable") {
-      if (!V) { leave("Camera " + room + " nu există sau gazda a închis jocul."); return; }
-      connStatus("Gazda e offline, aștept…"); setTimeout(() => { if (!leaving && net.peer === peer) connectHost(); }, 3000);
+      if (!V && ++net.misses > 20) { leave("Nu găsesc camera " + room + ". Verifică codul și ca gazda să aibă pagina jocului deschisă."); return; }
+      connStatus(V ? "Gazda e offline, aștept…" : "Caut camera " + room + "…"); setTimeout(() => { if (!leaving && net.peer === peer) connectHost(); }, 3000);
     } else if (["network", "server-error", "socket-error", "socket-closed"].includes(e.type)) {
       connStatus("fără conexiune, reîncerc…");
       setTimeout(() => { if (!leaving && net.peer === peer) { peer.destroy(); startGuest(); } }, 3000);
     }
   });
   clearTimeout(net.joinT);
-  net.joinT = setTimeout(() => { if (!V && !leaving && net.mode === "guest") leave("Nu mă pot conecta la camera " + room + ". Verifică codul."); }, 15000);
+  net.joinT = setTimeout(() => { if (!V && !leaving && net.mode === "guest") leave("Nu mă pot conecta la camera " + room + ". Verifică codul și ca gazda să aibă pagina deschisă."); }, 75000);
 }
 function connectHost() {
   const conn = net.peer.connect(PREFIX + room, { reliable: true });
@@ -705,6 +707,19 @@ function renderEnd() {
 }
 $("#rematchBtn").onclick = () => send({ type: "rematch", salt: crypto.getRandomValues(new Uint32Array(1))[0] });
 $("#newSongsBtn").onclick = () => { songs.forEach((s) => Object.assign(s, { url: "", s: null, id: null, t: "", d: 0, st: "empty", err: "", edited: false })); send({ type: "newsongs" }); };
+
+// când revii în pagină (ex. după ce ai trimis codul pe WhatsApp), refacem conexiunea
+document.addEventListener("visibilitychange", () => {
+  const p = net.peer;
+  if (document.hidden || leaving || !p) return;
+  if (net.mode === "host") {
+    if (p.destroyed) openHostPeer(0);
+    else if (p.disconnected) { try { p.reconnect(); } catch {} }
+  } else if (net.mode === "guest") {
+    if (p.disconnected && !p.destroyed) { try { p.reconnect(); } catch {} }
+    else if (p.open && !net.hostConn?.open) connectHost();
+  }
+});
 
 // ── pornire ─────────────────────────────────────────────────────────────────
 (async function boot() {
