@@ -130,6 +130,7 @@ function onHostData(conn, m) {
 
 function startGuest() {
   net.mode = "guest"; leaving = false; helloSent = false; net.misses = 0;
+  $("#homeErr").style.color = "var(--mut)"; $("#homeErr").textContent = "Mă conectez la camera " + room + "…";
   const peer = new Peer(PEER_OPTS);
   net.peer = peer;
   peer.on("open", () => connectHost());
@@ -137,7 +138,8 @@ function startGuest() {
   peer.on("error", (e) => {
     if (leaving || net.peer !== peer) return;
     if (e.type === "peer-unavailable") {
-      if (!V && ++net.misses > 20) { leave("Nu găsesc camera " + room + ". Verifică codul și ca gazda să aibă pagina jocului deschisă."); return; }
+      if (!V) $("#homeErr").textContent = "Camera " + room + " nu e deschisă acum. Gazda trebuie să aibă jocul deschis pe ecran. Mai încerc…";
+      if (!V && ++net.misses > 10) { leave("Nu găsesc camera " + room + ". Verifică codul și ca gazda să aibă pagina jocului deschisă."); return; }
       connStatus(V ? "Gazda e offline, aștept…" : "Caut camera " + room + "…"); setTimeout(() => { if (!leaving && net.peer === peer) connectHost(); }, 3000);
     } else if (["network", "server-error", "socket-error", "socket-closed"].includes(e.type)) {
       connStatus("fără conexiune, reîncerc…");
@@ -145,7 +147,7 @@ function startGuest() {
     }
   });
   clearTimeout(net.joinT);
-  net.joinT = setTimeout(() => { if (!V && !leaving && net.mode === "guest") leave("Nu mă pot conecta la camera " + room + ". Verifică codul și ca gazda să aibă pagina deschisă."); }, 75000);
+  net.joinT = setTimeout(() => { if (!V && !leaving && net.mode === "guest") leave("Nu mă pot conecta la camera " + room + ". Verifică codul și ca gazda să aibă pagina deschisă."); }, 40000);
 }
 function connectHost() {
   const conn = net.peer.connect(PREFIX + room, { reliable: true });
@@ -214,7 +216,7 @@ $("#gateForm").addEventListener("submit", async (e) => {
 function goHome(err) {
   show("home");
   $("#homeName").value = store.get("gp:name");
-  $("#homeErr").textContent = err || "";
+  $("#homeErr").textContent = err || ""; $("#homeErr").style.color = "";
   const linked = !!room;
   $("#homeLinkJoin").hidden = !linked; $("#homeChoices").hidden = linked;
   $("#homeLinkCode").textContent = room;
